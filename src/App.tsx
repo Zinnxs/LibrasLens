@@ -66,18 +66,30 @@ export default function App() {
 
     const initModel = async () => {
       try {
-        await tf.ready();
         const model = handPoseDetection.SupportedModels.MediaPipeHands;
-        const detectorConfig = {
-          runtime: "tfjs",
-          modelType: "lite",
-          maxHands: 1,
-        } as handPoseDetection.MediaPipeHandsTfjsModelConfig;
+        let newDetector: handPoseDetection.HandDetector;
 
-        const newDetector = await handPoseDetection.createDetector(
-          model,
-          detectorConfig,
-        );
+        try {
+          const detectorConfig = {
+            runtime: "mediapipe",
+            solutionPath: "https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240",
+            modelType: "lite",
+            maxHands: 1,
+          } as handPoseDetection.MediaPipeHandsMediaPipeModelConfig;
+          newDetector = await handPoseDetection.createDetector(model, detectorConfig);
+        } catch (mpErr) {
+          console.warn("MediaPipe failed, falling back to TFJS", mpErr);
+          await tf.ready();
+          const tfjsConfig = {
+            runtime: "tfjs",
+            modelType: "lite",
+            maxHands: 1,
+            detectorModelUrl: "https://www.kaggle.com/models/mediapipe/handpose-3d/tfJs/detector-lite/1/model.json?tfjs-format=file",
+            landmarkModelUrl: "https://www.kaggle.com/models/mediapipe/handpose-3d/tfJs/landmark-lite/1/model.json?tfjs-format=file",
+          } as handPoseDetection.MediaPipeHandsTfjsModelConfig;
+          newDetector = await handPoseDetection.createDetector(model, tfjsConfig);
+        }
+
         if (active) {
           setDetector(newDetector);
           setIsModelLoading(false);
