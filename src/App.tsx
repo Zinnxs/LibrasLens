@@ -18,6 +18,7 @@ export default function App() {
   const [isModelLoading, setIsModelLoading] = useState(true);
   const [detector, setDetector] = useState<handPoseDetection.HandDetector | null>(null);
   const [isVideoReady, setIsVideoReady] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
   const [activeGesture, setActiveGesture] = useState<string | null>(null);
   const [currentSentence, setCurrentSentence] = useState<string>('');
   
@@ -48,10 +49,11 @@ export default function App() {
         await tf.ready();
         const model = handPoseDetection.SupportedModels.MediaPipeHands;
         const detectorConfig = {
-          runtime: 'tfjs',
+          runtime: 'mediapipe',
           modelType: 'full',
           maxHands: 1,
-        } as handPoseDetection.MediaPipeHandsTfjsModelConfig;
+          solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/hands'
+        } as handPoseDetection.MediaPipeHandsMediaPipeModelConfig;
         
         const newDetector = await handPoseDetection.createDetector(model, detectorConfig);
         if (active) {
@@ -83,6 +85,7 @@ export default function App() {
         };
       } catch (err) {
         console.error("Camera error:", err);
+        setCameraError("Camera unavailable. Ensure permissions are granted.");
       }
     };
     setupCamera();
@@ -226,10 +229,10 @@ export default function App() {
                 </div>
              )}
 
-             {!isVideoReady && !isModelLoading && (
+             {!isVideoReady && (
                <div className="flex flex-col items-center text-white/30 gap-4 z-20">
-                 <VideoOff className="w-8 h-8 opacity-50" />
-                 <p className="text-xs uppercase tracking-widest">Iniciando câmera...</p>
+                 <VideoOff className={`w-8 h-8 ${cameraError ? 'text-amber-500 opacity-80' : 'opacity-50'}`} />
+                 <p className={`text-xs uppercase tracking-widest ${cameraError ? 'text-amber-500' : ''}`}>{cameraError ? cameraError : "Iniciando câmera..."}</p>
                </div>
              )}
              <video 
