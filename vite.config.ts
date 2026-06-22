@@ -13,22 +13,7 @@ export default defineConfig(() => {
         registerType: 'autoUpdate',
         workbox: {
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
-          runtimeCaching: [
-            {
-              urlPattern: /^https:\/\/(tfhub\.dev|storage\.googleapis\.com|cdn\.jsdelivr\.net)\/.*/i,
-              handler: 'CacheFirst',
-              options: {
-                cacheName: 'tfjs-models-cache',
-                expiration: {
-                  maxEntries: 50,
-                  maxAgeSeconds: 60 * 60 * 24 * 365
-                },
-                cacheableResponse: {
-                  statuses: [0, 200]
-                }
-              }
-            }
-          ]
+          cleanupOutdatedCaches: true
         },
         manifest: {
           name: 'LibrasLens',
