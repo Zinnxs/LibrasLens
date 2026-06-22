@@ -144,9 +144,11 @@ export default function App() {
   useEffect(() => {
     let animationFrameId: number;
 
-    // We add a timer to prevent repeating the same letter too fast
-    let lastGestureTime = 0;
-    let gestureCooldown = 1500; // 1.5 seconds
+    const historyLength = 15;
+    const gestureHistory: (string | null)[] = [];
+    
+    let lastCommittedGesture: string | null = null;
+    let lastCommittedTime = 0;
 
     const detect = async () => {
       if (videoRef.current && canvasRef.current && detector && isVideoReady) {
@@ -178,16 +180,55 @@ export default function App() {
               }
 
               // Guess Gesture
-              const guess = guessGesture(keypoints);
-              setActiveGesture(guess);
-
-              const now = Date.now();
-              if (guess && now - lastGestureTime > gestureCooldown) {
-                lastGestureTime = now;
-                setCurrentSentence((prev) => prev + guess);
+              const rawGuess = guessGesture(keypoints);
+              gestureHistory.push(rawGuess);
+              if (gestureHistory.length > historyLength) {
+                gestureHistory.shift();
               }
+
+              // Find most frequent gesture
+              const frequencies: Record<string, number> = {};
+              let maxFreq = 0;
+              let smoothedGuess: string | null = null;
+
+              for (const g of gestureHistory) {
+                if (g) {
+                  frequencies[g] = (frequencies[g] || 0) + 1;
+                  if (frequencies[g] > maxFreq) {
+                    maxFreq = frequencies[g];
+                    smoothedGuess = g;
+                  }
+                }
+              }
+
+              // If dominant gesture > 60% of history
+              if (maxFreq >= historyLength * 0.6 && smoothedGuess) {
+                setActiveGesture(smoothedGuess);
+
+                const now = Date.now();
+                if (smoothedGuess !== lastCommittedGesture || (now - lastCommittedTime > 2000)) {
+                  setCurrentSentence((prev) => prev + smoothedGuess);
+                  lastCommittedGesture = smoothedGuess;
+                  lastCommittedTime = now;
+                  
+                  // Clear history after commit to avoid immediately triggering again
+                  gestureHistory.length = 0;
+                }
+              } else {
+                setActiveGesture(null);
+                // Also push null if too noisy
+              }
+
             } else {
               setActiveGesture(null);
+              gestureHistory.push(null);
+              if (gestureHistory.length > historyLength) {
+                gestureHistory.shift();
+              }
+              // If we see nothing for a while, clear last committed so we can type same letter again
+              if (gestureHistory.every(g => g === null)) {
+                 lastCommittedGesture = null;
+              }
             }
           } catch (e) {
             console.error("Detection error: ", e);

@@ -177,15 +177,56 @@ export const guessGesture = (keypoints: Keypoint[]): string | null => {
       return "N";
   }
 
-  // O: Tips touching thumb
+  // O: Tips touching thumb forming O shape
   if (!indexUp && !middleUp && !ringUp && !pinkyUp) {
     if (
       thumbIndexDist < indexMiddleBaseDist * 1.5 &&
-      distance(thumb.tip, middle.tip) < indexMiddleBaseDist * 1.5
+      distance(thumb.tip, middle.tip) < indexMiddleBaseDist * 1.5 &&
+      distance(thumb.tip, pinky.tip) > indexMiddleBaseDist // pinky not tightly touching
     ) {
       return "O";
     }
   }
 
+  // E: Tightly clawed, tips of fingers clustered near the thumb tip or palm but not O
+  if (!indexUp && !middleUp && !pinkyUp && !ringUp) {
+    // If they form a claw, tips are relatively close to each other
+    const clawDist = distance(index.tip, pinky.tip);
+    if (clawDist < indexMiddleBaseDist * 2.5 && isIndexFolded && isMiddleFolded) {
+       // if thumb is also somewhat tucked
+       if (!thumbExtendDist) {
+          // It's very hard to perfectly separate A, S, E with basic 2D keypoints
+          // We'll let E be distinguished if it's tightly curled but not a full fist.
+          // Since we might not have a perfect classifier, let's just return E if fingers are curled
+          // and thumb is also tucked, and not O.
+          // Let's refine A vs S vs E
+       }
+    }
+  }
+
+  // Let's simplify and make robust rules for the closed hand states:
+  if (!indexUp && !middleUp && !ringUp && !pinkyUp) {
+    
+    // Distinguish M and N:
+    // M has index, middle, ring hanging over thumb. Pinky is tight folded.
+    // N has index, middle hanging over thumb. Ring & pinky tight folded.
+    if (!isIndexFolded && !isMiddleFolded && !isRingFolded && isPinkyFolded) return "M";
+    if (!isIndexFolded && !isMiddleFolded && isRingFolded && isPinkyFolded) return "N";
+
+    // If completely folded:
+    if (isIndexFolded && isMiddleFolded && isRingFolded && isPinkyFolded) {
+      if (thumbExtendDist) return "A";
+      
+      // S vs E:
+      // In S, the thumb crosses over the fingers (thumb tip is closer to ring/pinky).
+      // In E, the thumb is tucked or tips are together.
+      // Let's just use proximity of thumb tip to index/middle vs ring.
+      if (distance(thumb.tip, index.pip) < indexMiddleBaseDist * 1.5) {
+         return "E"; 
+      }
+      return "S";
+    }
+  }
+  
   return null;
 };
