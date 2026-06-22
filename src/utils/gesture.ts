@@ -1,7 +1,6 @@
 export type Point = { x: number; y: number; z?: number };
 export type Keypoint = { x: number; y: number; z?: number; name?: string };
 
-// Helper to calculate distance between two points
 const distance = (p1: Point, p2: Point) => {
   return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
 };
@@ -9,52 +8,96 @@ const distance = (p1: Point, p2: Point) => {
 export const guessGesture = (keypoints: Keypoint[]): string | null => {
   if (!keypoints || keypoints.length < 21) return null;
 
-  // Keypoints mapping according to TFJS HandPose Detection:
-  // 0: wrist
-  // Thumb: 1(cmc), 2(mcp), 3(ip), 4(tip)
-  // Index: 5(mcp), 6(pip), 7(dip), 8(tip)
-  // Middle: 9(mcp), 10(pip), 11(dip), 12(tip)
-  // Ring: 13(mcp), 14(pip), 15(dip), 16(tip)
-  // Pinky: 17(mcp), 18(pip), 19(dip), 20(tip)
-
   const wrist = keypoints[0];
+  const thumb = { mcp: keypoints[2], ip: keypoints[3], tip: keypoints[4] };
+  const index = { mcp: keypoints[5], pip: keypoints[6], tip: keypoints[8] };
+  const middle = { mcp: keypoints[9], pip: keypoints[10], tip: keypoints[12] };
+  const ring = { mcp: keypoints[13], pip: keypoints[14], tip: keypoints[16] };
+  const pinky = { mcp: keypoints[17], pip: keypoints[18], tip: keypoints[20] };
 
-  // Simple heuristic for finger extension:
-  // Is the distance from finger tip to wrist greater than finger pip to wrist?
-  // Also tip should be higher (y is smaller) than the mcp if standing upright,
-  // but let's just use purely distance for rotation invariance, combined with some relative checks.
+  // Calculate finger extensions mapping.
+  // Extended means tip is further from wrist than pip
+  const isThumbExtended = distance(thumb.tip, pinky.mcp) > distance(thumb.ip, pinky.mcp) * 1.2;
+  const isIndexExtended = distance(index.tip, wrist) > distance(index.pip, wrist);
+  const isMiddleExtended = distance(middle.tip, wrist) > distance(middle.pip, wrist);
+  const isRingExtended = distance(ring.tip, wrist) > distance(ring.pip, wrist);
+  const isPinkyExtended = distance(pinky.tip, wrist) > distance(pinky.pip, wrist);
 
-  const isThumbOpen = distance(keypoints[4], keypoints[17]) > distance(keypoints[3], keypoints[17]) * 1.2;
-  const isIndexOpen = distance(keypoints[8], wrist) > distance(keypoints[6], wrist) * 1.2;
-  const isMiddleOpen = distance(keypoints[12], wrist) > distance(keypoints[10], wrist) * 1.2;
-  const isRingOpen = distance(keypoints[16], wrist) > distance(keypoints[14], wrist) * 1.2;
-  const isPinkyOpen = distance(keypoints[20], wrist) > distance(keypoints[18], wrist) * 1.2;
+  // Are they pointing down? (tip is lower than mcp, visually y is greater)
+  const isIndexDown = index.tip.y > index.mcp.y;
+  const isMiddleDown = middle.tip.y > middle.mcp.y;
+  const isRingDown = ring.tip.y > ring.mcp.y;
+  const isPinkyDown = pinky.tip.y > pinky.mcp.y;
 
-  // Let's create an array of booleans for [Thumb, Index, Middle, Ring, Pinky]
-  const fingers = [isThumbOpen, isIndexOpen, isMiddleOpen, isRingOpen, isPinkyOpen];
+  // Distances between fingers
+  const indexMiddleDist = distance(index.tip, middle.tip);
+  const indexMiddleBaseDist = distance(index.mcp, middle.mcp);
+  const thumbIndexDist = distance(thumb.tip, index.tip);
 
-  // O: All fingers slightly open but forming a circle. Let's just use a loose check.
-  // We'll rely on our basic checks.
+  // Helper flags for "extended AND pointing UP"
+  const indexUp = isIndexExtended && !isIndexDown;
+  const middleUp = isMiddleExtended && !isMiddleDown;
+  const ringUp = isRingExtended && !isRingDown;
+  const pinkyUp = isPinkyExtended && !isPinkyDown;
 
-  // A: All fingers closed, thumb might be slightly open to the side
-  if (!fingers[1] && !fingers[2] && !fingers[3] && !fingers[4] && fingers[0]) return "A";
-  // B: All fingers open except thumb (thumb folded inwards)
-  if (fingers[1] && fingers[2] && fingers[3] && fingers[4] && !fingers[0]) return "B";
-  // F: Index and thumb touching (closed together), Middle, Ring, Pinky open
-  if (!fingers[0] && !fingers[1] && fingers[2] && fingers[3] && fingers[4]) return "F";
-  // L: Thumb and index open, rest closed
-  if (fingers[0] && fingers[1] && !fingers[2] && !fingers[3] && !fingers[4]) return "L";
-  // V: Index and middle open, rest closed
-  if (!fingers[0] && fingers[1] && fingers[2] && !fingers[3] && !fingers[4]) return "V";
-  // U: Index and middle open (but normally they are together). We'll treat V and U as V for this heuristic
-  // W: Index, middle, ring open
-  if (!fingers[0] && fingers[1] && fingers[2] && fingers[3] && !fingers[4]) return "W";
-  // Y: Thumb and pinky open
-  if (fingers[0] && !fingers[1] && !fingers[2] && !fingers[3] && fingers[4]) return "Y";
-  // I: Only pinky open
-  if (!fingers[0] && !fingers[1] && !fingers[2] && !fingers[3] && fingers[4]) return "I";
-  // 5 (Open Palm): All fingers open
-  if (fingers[0] && fingers[1] && fingers[2] && fingers[3] && fingers[4]) return "5";
+  // Let's go priority by priority (most unique first)
+
+  // 5 (Open Palm): All 5 extended
+  if (isThumbExtended && indexUp && middleUp && ringUp && pinkyUp) return "5";
+
+  // B: 4 fingers straight up, thumb tucked
+  if (!isThumbExtended && indexUp && middleUp && ringUp && pinkyUp) return "B";
+
+  // W: Index, middle, ring extended and up
+  if (!isThumbExtended && indexUp && middleUp && ringUp && !isPinkyExtended) return "W";
+
+  // F: Index tip to Thumb tip touching, others extended up
+  // In Libras, F is index down touching thumb, others up
+  if (thumbIndexDist < indexMiddleBaseDist * 1.5 && middleUp && ringUp && pinkyUp) return "F";
+
+  // Y: Thumb extended, pinky extended
+  if (isThumbExtended && !isIndexExtended && !isMiddleExtended && !isRingExtended && isPinkyExtended) return "Y";
+  
+  // L: Thumb extended, index extended vertically
+  if (isThumbExtended && indexUp && !isMiddleExtended && !isRingExtended && !isPinkyExtended) return "L";
+
+  // V & U & R: Index and middle extended and up
+  if (!isThumbExtended && indexUp && middleUp && !isRingExtended && !isPinkyExtended) {
+    if (indexMiddleDist > indexMiddleBaseDist * 1.2) return "V";
+    
+    // Simplistic cross check for R: tip positions inverted relative to base positions
+    const crossedX = (index.tip.x > middle.tip.x && index.mcp.x < middle.mcp.x) || 
+                     (index.tip.x < middle.tip.x && index.mcp.x > middle.mcp.x);
+    if (crossedX) return "R";
+    
+    return "U";
+  }
+
+  // I: Only pinky extended
+  if (!isThumbExtended && !isIndexExtended && !isMiddleExtended && !isRingExtended && isPinkyExtended) return "I";
+
+  // D: Index extended up, others closed
+  if (!isThumbExtended && indexUp && !isMiddleExtended && !isRingExtended && !isPinkyExtended) return "D";
+
+  // M and N are characterized by fingers explicitly pointing down over the thumb.
+  // Because they are pointing down, they might register as "not extended" with the wrist heuristic, 
+  // or they might be somewhat extended but pointing down.
+  // We check if they are explicitly down.
+  if (isIndexDown && isMiddleDown && isRingDown && !isPinkyExtended && !isThumbExtended) return "M";
+  if (isIndexDown && isMiddleDown && !isRingDown && !isPinkyExtended && !isThumbExtended) return "N";
+
+  // A vs S: Both closed fists.
+  // A: Thumb is extended alongside closed fingers.
+  // S: Thumb is wrapped over fingers.
+  if (!isIndexExtended && !isMiddleExtended && !isRingExtended && !isPinkyExtended) {
+    if (isThumbExtended) return "A";
+    return "S";
+  }
+
+  // O: Tips touching thumb
+  if (thumbIndexDist < indexMiddleBaseDist && distance(thumb.tip, middle.tip) < indexMiddleBaseDist && distance(thumb.tip, ring.tip) < indexMiddleBaseDist) {
+     return "O";
+  }
 
   return null;
 };
