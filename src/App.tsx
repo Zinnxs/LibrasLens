@@ -20,9 +20,14 @@ import {
   Trash2,
   Copy,
   PlusCircle,
-  Undo2
+  Undo2,
+  Upload,
+  Download,
+  Database,
+  FileSpreadsheet,
+  Activity
 } from "lucide-react";
-import { guessGesture } from "./utils/gesture";
+import { guessGesture, classifyWithKNN, parseCSV, CSVSample, ColumnMapping, autoDetectMapping, parseCSVWithMapping, Point } from "./utils/gesture";
 import { AnimatePresence, motion } from "motion/react";
 import { SignsGuide } from "./components/SignsGuide";
 
@@ -32,9 +37,34 @@ type TranslationRecord = {
   text: string;
 };
 
+const LANDMARK_NAMES: Record<number, string> = {
+  0: "Pulso (Wrist)",
+  1: "Polegar: Base (CMC)",
+  2: "Polegar: MCP",
+  3: "Polegar: IP",
+  4: "Polegar: Ponta (Tip)",
+  5: "Indicador: MCP",
+  6: "Indicador: PIP",
+  7: "Indicador: DIP",
+  8: "Indicador: Ponta (Tip)",
+  9: "Médio: MCP",
+  10: "Médio: PIP",
+  11: "Médio: DIP",
+  12: "Médio: Ponta (Tip)",
+  13: "Anelar: MCP",
+  14: "Anelar: PIP",
+  15: "Anelar: DIP",
+  16: "Anelar: Ponta (Tip)",
+  17: "Mindinho: MCP",
+  18: "Mindinho: PIP",
+  19: "Mindinho: DIP",
+  20: "Mindinho: Ponta (Tip)"
+};
+
 export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const latestKeypointsRef = useRef<any>(null);
 
   // Core model and camera states
   const [isModelLoading, setIsModelLoading] = useState(true);
@@ -48,8 +78,8 @@ export default function App() {
   // Custom camera facingMode: "user" (front) or "environment" (rear)
   const [facingMode, setFacingMode] = useState<"user" | "environment">("user");
 
-  // Interaction modes: "translator" (realtime dictation) or "practice" (learning game)
-  const [appMode, setAppMode] = useState<"translator" | "practice">("translator");
+  // Interaction modes: "translator" (realtime dictation), "practice" (learning game), or "dataset" (manage samples)
+  const [appMode, setAppMode] = useState<"translator" | "practice" | "dataset">("translator");
 
   // State for Translator mode
   const [currentSentence, setCurrentSentence] = useState<string>("");
@@ -70,6 +100,25 @@ export default function App() {
     const saved = localStorage.getItem("libras_practice_streak");
     return saved ? parseInt(saved, 10) : 0;
   });
+
+  // Custom CSV & Landmark Dataset States
+  const [csvSamples, setCsvSamples] = useState<CSVSample[]>(() => {
+    const saved = localStorage.getItem("libras_csv_samples");
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [predictorType, setPredictorType] = useState<"heuristic" | "custom">(() => {
+    return (localStorage.getItem("predictor_type") as "heuristic" | "custom") || "heuristic";
+  });
+  const [recordLabel, setRecordLabel] = useState<string>("A");
+  const [isRecordingFlash, setIsRecordingFlash] = useState(false);
+  const [csvError, setCsvError] = useState<string | null>(null);
+
+  // Interactive CSV Mapping Wizard States
+  const [uploadedCsvText, setUploadedCsvText] = useState<string>("");
+  const [csvHeaders, setCsvHeaders] = useState<string[]>([]);
+  const [columnMappings, setColumnMappings] = useState<ColumnMapping[]>([]);
+  const [showMappingWizard, setShowMappingWizard] = useState(false);
+  const [invertCsvY, setInvertCsvY] = useState(false);
 
   // System states
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
@@ -123,6 +172,17 @@ export default function App() {
   };
 
   useEffect(() => {
+    // Unregister any stale or broken service workers to prevent 'Failed to fetch' blocks in sandbox iframes
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then((registrations) => {
+        for (const registration of registrations) {
+          registration.unregister().then(() => {
+            console.log("Unregistered service worker to prevent dynamic asset fetch blocks.");
+          });
+        }
+      }).catch((e) => console.warn("Service worker check ignored:", e));
+    }
+
     const handleOnline = () => setIsOffline(false);
     const handleOffline = () => setIsOffline(true);
     window.addEventListener("online", handleOnline);
@@ -145,7 +205,7 @@ export default function App() {
         try {
           const detectorConfig = {
             runtime: "mediapipe",
-            solutionPath: "https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/",
+            solutionPath: "/mediapipe/",
             modelType: "lite",
             maxHands: 1,
           } as handPoseDetection.MediaPipeHandsMediaPipeModelConfig;
@@ -154,8 +214,31 @@ export default function App() {
             detectorConfig,
           );
         } catch (mpErr) {
-          console.error("MediaPipe failed:", mpErr);
-          throw mpErr;
+          console.warn("Local MediaPipe failed, retrying with versioned CDN:", mpErr);
+          try {
+            const detectorConfig = {
+              runtime: "mediapipe",
+              solutionPath: "https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/",
+              modelType: "lite",
+              maxHands: 1,
+            } as handPoseDetection.MediaPipeHandsMediaPipeModelConfig;
+            newDetector = await handPoseDetection.createDetector(
+              model,
+              detectorConfig,
+            );
+          } catch (cdnErr) {
+            console.warn("Versioned CDN MediaPipe failed, trying generic CDN:", cdnErr);
+            const detectorConfig = {
+              runtime: "mediapipe",
+              solutionPath: "https://cdn.jsdelivr.net/npm/@mediapipe/hands/",
+              modelType: "lite",
+              maxHands: 1,
+            } as handPoseDetection.MediaPipeHandsMediaPipeModelConfig;
+            newDetector = await handPoseDetection.createDetector(
+              model,
+              detectorConfig,
+            );
+          }
         }
 
         if (active) {
@@ -315,8 +398,17 @@ export default function App() {
                 ctx.fill();
               }
 
-              // Guess Gesture
-              const rawGuess = guessGesture(keypoints);
+              // Store keypoints in ref for instant landmark recording
+              latestKeypointsRef.current = keypoints;
+
+              // Guess Gesture (Dynamic: heuristic or custom KNN-based dataset)
+              let rawGuess: string | null = null;
+              if (predictorType === "custom" && csvSamples.length > 0) {
+                rawGuess = classifyWithKNN(keypoints, csvSamples);
+              } else {
+                rawGuess = guessGesture(keypoints);
+              }
+
               gestureHistory.push(rawGuess);
               if (gestureHistory.length > historyLength) {
                 gestureHistory.shift();
@@ -363,6 +455,7 @@ export default function App() {
                 setActiveGesture(null);
               }
             } else {
+              latestKeypointsRef.current = null;
               setActiveGesture(null);
               gestureHistory.push(null);
               if (gestureHistory.length > historyLength) {
@@ -417,6 +510,119 @@ export default function App() {
       return () => clearInterval(interval);
     }
   }, [activeGesture, practiceTarget, appMode]);
+
+  // Interactive CSV Column Mapping Wizard Preview Renderer
+  const wizardPreviewCanvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    if (showMappingWizard && uploadedCsvText && wizardPreviewCanvasRef.current) {
+      try {
+        const parsed = parseCSVWithMapping(uploadedCsvText, columnMappings);
+        const canvas = wizardPreviewCanvasRef.current;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+
+        // Fill background
+        ctx.fillStyle = "#020617"; // slate-950
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        if (parsed && parsed.length > 0) {
+          const sample = parsed[0];
+          
+          // Grid lines
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          for (let i = 20; i < canvas.width; i += 20) {
+            ctx.moveTo(i, 0); ctx.lineTo(i, canvas.height);
+          }
+          for (let i = 20; i < canvas.height; i += 20) {
+            ctx.moveTo(0, i); ctx.lineTo(canvas.width, i);
+          }
+          ctx.stroke();
+
+          // Draw label
+          ctx.fillStyle = "#10b981";
+          ctx.font = "bold 11px monospace";
+          ctx.fillText(`Amostra: "${sample.label}"`, 10, 20);
+
+          const pts = sample.landmarks || sample.points.reduce<Record<number, Point>>((acc, p, i) => {
+            acc[i] = p;
+            return acc;
+          }, {});
+
+          // Scale and center [-1, 1] to fitting dimensions
+          const scaleX = canvas.width * 0.45;
+          const scaleY = canvas.height * 0.45;
+          const centerX = canvas.width / 2;
+          const centerY = canvas.height / 2;
+
+          const toCanvasCoords = (pt: Point) => {
+            const yVal = invertCsvY ? -pt.y : pt.y;
+            return {
+              x: centerX + pt.x * scaleX,
+              y: centerY + yVal * scaleY
+            };
+          };
+
+          // Draw skeleton connections
+          const connections = [
+            [0, 1, 2, 3, 4],       // Thumb
+            [0, 5, 6, 7, 8],       // Index
+            [0, 9, 10, 11, 12],    // Middle
+            [0, 13, 14, 15, 16],   // Ring
+            [0, 17, 18, 19, 20]    // Pinky
+          ];
+
+          ctx.lineWidth = 2.5;
+          ctx.strokeStyle = "rgba(16, 185, 129, 0.7)";
+          connections.forEach(group => {
+            ctx.beginPath();
+            let first = true;
+            group.forEach(idx => {
+              const pt = pts[idx];
+              if (pt && (pt.x !== 0 || pt.y !== 0)) {
+                const cCoords = toCanvasCoords(pt);
+                if (first) {
+                  ctx.moveTo(cCoords.x, cCoords.y);
+                  first = false;
+                } else {
+                  ctx.lineTo(cCoords.x, cCoords.y);
+                }
+              }
+            });
+            ctx.stroke();
+          });
+
+          // Draw joints
+          Object.entries(pts).forEach(([idxStr, pt]) => {
+            const idx = parseInt(idxStr, 10);
+            if (pt && (pt.x !== 0 || pt.y !== 0)) {
+              const cCoords = toCanvasCoords(pt);
+              ctx.beginPath();
+              ctx.arc(cCoords.x, cCoords.y, 4.5, 0, 2 * Math.PI);
+              ctx.fillStyle = "#10b981";
+              ctx.fill();
+              
+              // Draw text label on tip nodes
+              if ([0, 4, 8, 12, 16, 20].includes(idx)) {
+                ctx.fillStyle = "#ffffff";
+                ctx.font = "bold 8px sans-serif";
+                ctx.fillText(String(idx), cCoords.x + 6, cCoords.y + 2);
+              }
+            }
+          });
+        } else {
+          ctx.fillStyle = "#ef4444";
+          ctx.font = "12px sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText("Nenhum sinal detectado", canvas.width / 2, canvas.height / 2);
+        }
+      } catch (err) {
+        console.error("Error drawing wizard preview: ", err);
+      }
+    }
+  }, [showMappingWizard, uploadedCsvText, columnMappings, invertCsvY]);
 
   // On correct practice target gesture completed
   const handlePracticeSuccess = useCallback(() => {
@@ -493,11 +699,276 @@ export default function App() {
     setTimeout(() => setCopiedNotification(false), 2000);
   };
 
-  const changeAppMode = (mode: "translator" | "practice") => {
+  const changeAppMode = (mode: "translator" | "practice" | "dataset") => {
     playModeSwitchSound();
     setAppMode(mode);
     setPracticeProgress(0);
     setActiveGesture(null);
+  };
+
+  // CSV file uploader handler
+  const handleCSVUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setCsvError(null);
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const text = event.target?.result as string;
+        if (!text) {
+          setCsvError("O arquivo carregado está vazio.");
+          return;
+        }
+
+        const lines = text.split(/\r?\n/).filter(line => line.trim().length > 0);
+        if (lines.length === 0) {
+          setCsvError("O arquivo carregado está vazio.");
+          return;
+        }
+
+        const firstLine = lines[0].trim();
+        const headers = firstLine.split(/[;,]/).map((h, i) => h.trim().replace(/['"']/g, "") || `Coluna_${i}`);
+
+        setUploadedCsvText(text);
+        setCsvHeaders(headers);
+
+        // Auto detect initial mapping
+        const initialMapping = autoDetectMapping(headers);
+        setColumnMappings(initialMapping);
+        setShowMappingWizard(true);
+      } catch (err) {
+        console.error("Error preparing CSV: ", err);
+        setCsvError("Falha ao abrir o CSV: " + String(err));
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const applyMappingPreset = (preset: "autodetect" | "mp_3d" | "mp_2d" | "tips_3d" | "tips_2d") => {
+    if (!csvHeaders || csvHeaders.length === 0) return;
+
+    let newMappings: ColumnMapping[] = [];
+
+    // Find label column index: default to column named 'label'/'class'/'classe' or first column
+    const cleanHeaders = csvHeaders.map(h => h.toLowerCase().trim());
+    let labelIdx = cleanHeaders.findIndex(h => 
+      h === "label" || h === "class" || h === "classe" || h === "gesture" || h === "target" || h === "char" || h === "letter"
+    );
+    if (labelIdx === -1) labelIdx = 0;
+
+    if (preset === "autodetect") {
+      newMappings = autoDetectMapping(csvHeaders);
+    } else if (preset === "mp_3d") {
+      csvHeaders.forEach((header, i) => {
+        if (i === labelIdx) {
+          newMappings.push({ colIndex: i, header, targetLandmark: -1, coordinate: "label" });
+          return;
+        }
+        const numericSeqIndex = i < labelIdx ? i : i - 1;
+        const lIdx = Math.floor(numericSeqIndex / 3);
+        const cType = numericSeqIndex % 3 === 0 ? "x" : numericSeqIndex % 3 === 1 ? "y" : "z";
+        if (lIdx >= 0 && lIdx <= 20) {
+          newMappings.push({ colIndex: i, header, targetLandmark: lIdx, coordinate: cType });
+        } else {
+          newMappings.push({ colIndex: i, header, targetLandmark: -1, coordinate: "x" });
+        }
+      });
+    } else if (preset === "mp_2d") {
+      csvHeaders.forEach((header, i) => {
+        if (i === labelIdx) {
+          newMappings.push({ colIndex: i, header, targetLandmark: -1, coordinate: "label" });
+          return;
+        }
+        const numericSeqIndex = i < labelIdx ? i : i - 1;
+        const lIdx = Math.floor(numericSeqIndex / 2);
+        const cType = numericSeqIndex % 2 === 0 ? "x" : "y";
+        if (lIdx >= 0 && lIdx <= 20) {
+          newMappings.push({ colIndex: i, header, targetLandmark: lIdx, coordinate: cType });
+        } else {
+          newMappings.push({ colIndex: i, header, targetLandmark: -1, coordinate: "x" });
+        }
+      });
+    } else if (preset === "tips_3d") {
+      const fingerTips = [4, 8, 12, 16, 20]; // Thumb, Index, Middle, Ring, Pinky Tips
+      csvHeaders.forEach((header, i) => {
+        if (i === labelIdx) {
+          newMappings.push({ colIndex: i, header, targetLandmark: -1, coordinate: "label" });
+          return;
+        }
+        const numericSeqIndex = i < labelIdx ? i : i - 1;
+        const fIdx = Math.floor(numericSeqIndex / 3);
+        const cType = numericSeqIndex % 3 === 0 ? "x" : numericSeqIndex % 3 === 1 ? "y" : "z";
+        if (fIdx >= 0 && fIdx < 5) {
+          newMappings.push({ colIndex: i, header, targetLandmark: fingerTips[fIdx], coordinate: cType });
+        } else {
+          newMappings.push({ colIndex: i, header, targetLandmark: -1, coordinate: "x" });
+        }
+      });
+    } else if (preset === "tips_2d") {
+      const fingerTips = [4, 8, 12, 16, 20];
+      csvHeaders.forEach((header, i) => {
+        if (i === labelIdx) {
+          newMappings.push({ colIndex: i, header, targetLandmark: -1, coordinate: "label" });
+          return;
+        }
+        const numericSeqIndex = i < labelIdx ? i : i - 1;
+        const fIdx = Math.floor(numericSeqIndex / 2);
+        const cType = numericSeqIndex % 2 === 0 ? "x" : "y";
+        if (fIdx >= 0 && fIdx < 5) {
+          newMappings.push({ colIndex: i, header, targetLandmark: fingerTips[fIdx], coordinate: cType });
+        } else {
+          newMappings.push({ colIndex: i, header, targetLandmark: -1, coordinate: "x" });
+        }
+      });
+    }
+
+    setColumnMappings(newMappings);
+  };
+
+  const updateSingleColumnMapping = (colIdx: number, targetLandmark: number, coordinate: "x" | "y" | "z" | "label") => {
+    setColumnMappings(prev => {
+      return prev.map(m => {
+        if (m.colIndex === colIdx) {
+          return { ...m, targetLandmark, coordinate };
+        }
+        // If coordinate is set to label, ensure only one label exists
+        if (coordinate === "label" && m.coordinate === "label" && m.colIndex !== colIdx) {
+          return { ...m, coordinate: "x", targetLandmark: -1 };
+        }
+        return m;
+      });
+    });
+  };
+
+  const confirmCSVImport = () => {
+    if (!uploadedCsvText) return;
+
+    try {
+      const parsed = parseCSVWithMapping(uploadedCsvText, columnMappings);
+      if (parsed.length === 0) {
+        setCsvError("Nenhum sinal válido detectado com o mapeamento selecionado.");
+        return;
+      }
+
+      // If invert Y is toggled, invert the Y coordinate of parsed points
+      if (invertCsvY) {
+        parsed.forEach(sample => {
+          sample.points.forEach(pt => {
+            pt.y = -pt.y;
+          });
+          if (sample.landmarks) {
+            Object.values(sample.landmarks).forEach(pt => {
+              pt.y = -pt.y;
+            });
+          }
+        });
+      }
+
+      setCsvSamples((prev) => {
+        const updated = [...prev, ...parsed];
+        localStorage.setItem("libras_csv_samples", JSON.stringify(updated));
+        return updated;
+      });
+
+      setPredictorType("custom");
+      localStorage.setItem("predictor_type", "custom");
+
+      setShowMappingWizard(false);
+      setUploadedCsvText("");
+      playSuccessSound();
+    } catch (err) {
+      console.error("Error importing with mapping: ", err);
+      setCsvError("Falha na importação: " + String(err));
+    }
+  };
+
+  // Live Sample Recorder
+  const recordSample = () => {
+    if (!latestKeypointsRef.current) {
+      alert("Nenhuma mão detectada pela câmera. Posicione sua mão em frente à câmera e tente novamente.");
+      return;
+    }
+
+    const labelUpper = recordLabel.toUpperCase().trim();
+    if (!labelUpper) {
+      alert("Por favor, digite uma letra ou caractere válido para o sinal.");
+      return;
+    }
+
+    const newSample: CSVSample = {
+      label: labelUpper,
+      points: latestKeypointsRef.current
+    };
+
+    setCsvSamples((prev) => {
+      const updated = [...prev, newSample];
+      localStorage.setItem("libras_csv_samples", JSON.stringify(updated));
+      return updated;
+    });
+
+    // Vibration feedback on mobile
+    if (navigator.vibrate) {
+      navigator.vibrate(55);
+    }
+
+    // Flash recording confirmation
+    setIsRecordingFlash(true);
+    setTimeout(() => setIsRecordingFlash(false), 250);
+  };
+
+  const clearSamples = () => {
+    if (window.confirm("Deseja realmente apagar todas as amostras carregadas do seu dataset?")) {
+      setCsvSamples([]);
+      localStorage.removeItem("libras_csv_samples");
+      setPredictorType("heuristic");
+      localStorage.setItem("predictor_type", "heuristic");
+    }
+  };
+
+  const deleteSampleGroup = (label: string) => {
+    if (window.confirm(`Deseja realmente apagar todas as amostras registradas para a letra "${label}"?`)) {
+      setCsvSamples((prev) => {
+        const updated = prev.filter(s => s.label !== label);
+        localStorage.setItem("libras_csv_samples", JSON.stringify(updated));
+        return updated;
+      });
+    }
+  };
+
+  const exportToCSV = () => {
+    if (csvSamples.length === 0) return;
+
+    // Standard columns: label, x0, y0, z0, ..., x20, y20, z20
+    let csvContent = "label";
+    for (let i = 0; i < 21; i++) {
+      csvContent += `,x${i},y${i},z${i}`;
+    }
+    csvContent += "\n";
+
+    csvSamples.forEach((sample) => {
+      let row = `"${sample.label}"`;
+      for (let i = 0; i < 21; i++) {
+        const pt = sample.points[i];
+        row += `,${pt?.x || 0},${pt?.y || 0},${pt?.z || 0}`;
+      }
+      csvContent += row + "\n";
+    });
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", "libras_custom_landmarks.csv");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const togglePredictorType = (type: "heuristic" | "custom") => {
+    setPredictorType(type);
+    localStorage.setItem("predictor_type", type);
+    playModeSwitchSound();
   };
 
   // Allow setting a training letter directly from the Signs Guide
@@ -556,10 +1027,10 @@ export default function App() {
 
       {/* Mode Switch Tabs bar */}
       <div className="px-4 sm:px-6 py-2 bg-slate-950/40 border-b border-white/5 flex items-center justify-between shrink-0 gap-3">
-        <div className="flex bg-slate-900/90 p-1 rounded-2xl border border-white/5 w-full sm:w-auto max-w-sm">
+        <div className="flex bg-slate-900/90 p-1 rounded-2xl border border-white/5 w-full sm:w-auto max-w-md">
           <button
             onClick={() => changeAppMode("translator")}
-            className={`flex-1 sm:flex-initial px-5 py-2 text-xs font-semibold rounded-xl transition-all duration-300 flex items-center justify-center gap-2 ${
+            className={`flex-1 sm:flex-initial px-4 py-2 text-xs font-semibold rounded-xl transition-all duration-300 flex items-center justify-center gap-2 ${
               appMode === "translator"
                 ? "bg-emerald-500 text-black shadow-lg shadow-emerald-500/20"
                 : "text-slate-400 hover:text-slate-200"
@@ -570,7 +1041,7 @@ export default function App() {
           </button>
           <button
             onClick={() => changeAppMode("practice")}
-            className={`flex-1 sm:flex-initial px-5 py-2 text-xs font-semibold rounded-xl transition-all duration-300 flex items-center justify-center gap-2 ${
+            className={`flex-1 sm:flex-initial px-4 py-2 text-xs font-semibold rounded-xl transition-all duration-300 flex items-center justify-center gap-2 ${
               appMode === "practice"
                 ? "bg-emerald-500 text-black shadow-lg shadow-emerald-500/20"
                 : "text-slate-400 hover:text-slate-200"
@@ -578,6 +1049,17 @@ export default function App() {
           >
             <Sparkles size={13} />
             <span>Treinar</span>
+          </button>
+          <button
+            onClick={() => changeAppMode("dataset")}
+            className={`flex-1 sm:flex-initial px-4 py-2 text-xs font-semibold rounded-xl transition-all duration-300 flex items-center justify-center gap-2 ${
+              appMode === "dataset"
+                ? "bg-emerald-500 text-black shadow-lg shadow-emerald-500/20"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            <Database size={13} />
+            <span>Dataset CSV</span>
           </button>
         </div>
 
@@ -590,6 +1072,13 @@ export default function App() {
             <div>
               Combo: 🔥<span className="text-amber-400 font-bold">{practiceStreak}</span>
             </div>
+          </div>
+        )}
+
+        {appMode === "dataset" && (
+          <div className="flex items-center gap-3 shrink-0 bg-slate-900/60 border border-white/5 px-4 py-1.5 rounded-2xl text-[11px] font-mono text-slate-300">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+            <span>Amostras: <span className="text-emerald-400 font-bold">{csvSamples.length}</span></span>
           </div>
         )}
       </div>
@@ -871,7 +1360,7 @@ export default function App() {
                   )}
                 </div>
               </>
-            ) : (
+            ) : appMode === "practice" ? (
               // Practice Mode detailed instructions panel
               <div className="flex flex-col h-full justify-between">
                 <div>
@@ -922,6 +1411,175 @@ export default function App() {
                     Selecionar Letra no Guia
                   </button>
                 </div>
+              </div>
+            ) : (
+              // Dataset CSV Mode Panel
+              <div className="flex flex-col h-full overflow-hidden">
+                <div className="flex items-center gap-2 mb-3">
+                  <Database size={14} className="text-emerald-400" />
+                  <h2 className="text-xs uppercase tracking-[0.15em] text-slate-400 font-bold">
+                    Controle de Dataset Customizado
+                  </h2>
+                </div>
+
+                {/* Predictor Toggle Selector */}
+                <div className="grid grid-cols-2 bg-slate-900/80 p-1 rounded-xl border border-white/5 mb-4 shrink-0">
+                  <button
+                    onClick={() => togglePredictorType("heuristic")}
+                    className={`px-3 py-2 text-[10px] uppercase tracking-wider font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 ${
+                      predictorType === "heuristic"
+                        ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                        : "text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    <Activity size={12} />
+                    <span>Algoritmo Padrão</span>
+                  </button>
+                  <button
+                    onClick={() => togglePredictorType("custom")}
+                    className={`px-3 py-2 text-[10px] uppercase tracking-wider font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 ${
+                      predictorType === "custom"
+                        ? "bg-emerald-500 text-black shadow-md shadow-emerald-500/10"
+                        : "text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    <FileSpreadsheet size={12} />
+                    <span>Seu Dataset CSV</span>
+                  </button>
+                </div>
+
+                {/* Sub-panels scrollable */}
+                <div className="flex-1 overflow-y-auto space-y-4 pr-1 pb-2 custom-scrollbar">
+                  
+                  {/* CSV Import card */}
+                  <div className="bg-white/[0.01] border border-white/5 p-4 rounded-2xl relative">
+                    <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-2 flex items-center gap-2">
+                      <Upload size={13} className="text-emerald-400" />
+                      Importar Planilha CSV (Python)
+                    </h3>
+                    <p className="text-[10px] text-slate-400 leading-relaxed mb-3">
+                      Carregue o CSV contendo landmarks gravados para usar seu próprio modelo matemático k-NN em tempo real.
+                    </p>
+                    <label className="flex flex-col items-center justify-center border border-dashed border-white/10 hover:border-emerald-500/30 bg-slate-950/40 p-3 rounded-xl cursor-pointer transition-all hover:bg-slate-950/70">
+                      <div className="flex items-center gap-2 text-xs text-emerald-400 font-medium">
+                        <FileSpreadsheet size={14} />
+                        <span>Escolher Arquivo CSV</span>
+                      </div>
+                      <input 
+                        type="file" 
+                        accept=".csv" 
+                        onChange={handleCSVUpload} 
+                        className="hidden" 
+                      />
+                    </label>
+                    {csvError && (
+                      <p className="text-[10px] text-red-400 mt-2 font-mono leading-relaxed">{csvError}</p>
+                    )}
+                  </div>
+
+                  {/* Realtime Landmark Sample Grabber */}
+                  <div className="bg-white/[0.01] border border-white/5 p-4 rounded-2xl relative overflow-hidden">
+                    {/* Recording instant visual feedback */}
+                    <AnimatePresence>
+                      {isRecordingFlash && (
+                        <motion.div 
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          exit={{ opacity: 0 }}
+                          className="absolute inset-0 bg-emerald-500/20 backdrop-blur-sm flex items-center justify-center z-10"
+                        >
+                          <span className="text-sm font-bold text-emerald-300 flex items-center gap-2 uppercase tracking-widest animate-pulse">
+                            <CheckCircle2 size={16} /> Amostra Gravada!
+                          </span>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+
+                    <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-2 flex items-center gap-2">
+                      <Camera size={13} className="text-emerald-400" />
+                      Gravar Amostra ao Vivo
+                    </h3>
+                    <p className="text-[10px] text-slate-400 leading-relaxed mb-3">
+                      Adicione amostras ao vivo do seu próprio sinal. Posicione a mão e clique para capturar instantaneamente as posições.
+                    </p>
+                    <div className="flex gap-2 items-center">
+                      <input
+                        type="text"
+                        value={recordLabel}
+                        onChange={(e) => setRecordLabel(e.target.value.slice(0, 3).toUpperCase())}
+                        placeholder="Letra (ex: A)"
+                        className="bg-slate-900 border border-white/10 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 w-24 text-center font-bold"
+                      />
+                      <button
+                        onClick={recordSample}
+                        className="flex-1 py-2 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-black text-xs font-bold rounded-xl uppercase tracking-wider transition-all"
+                      >
+                        Gravar Amostra
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Visual breakdown of loaded samples */}
+                  <div className="bg-white/[0.01] border border-white/5 p-4 rounded-2xl">
+                    <div className="flex justify-between items-center mb-2">
+                      <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+                        Amostras no Seu Dataset
+                      </h3>
+                      {csvSamples.length > 0 && (
+                        <button
+                          onClick={clearSamples}
+                          className="text-[9px] text-red-400 hover:text-red-300 uppercase tracking-wider font-bold"
+                        >
+                          Limpar Dataset
+                        </button>
+                      )}
+                    </div>
+
+                    {csvSamples.length === 0 ? (
+                      <div className="py-6 px-2 text-center text-[10px] text-slate-500 italic bg-slate-950/30 rounded-xl border border-white/5">
+                        Nenhum dado customizado carregado. Importe um CSV de Python ou grave amostras ao vivo acima!
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-3 gap-2 max-h-[140px] overflow-y-auto pr-1 custom-scrollbar">
+                        {Object.entries(
+                          csvSamples.reduce<Record<string, number>>((acc, sample) => {
+                            acc[sample.label] = (acc[sample.label] || 0) + 1;
+                            return acc;
+                          }, {})
+                        ).map(([label, countVal]) => {
+                          const count = countVal as number;
+                          return (
+                            <div 
+                              key={label}
+                              className="bg-white/[0.02] hover:bg-white/[0.04] border border-white/5 rounded-xl p-2 flex flex-col items-center justify-center relative group/sample shrink-0 transition-all"
+                            >
+                              <span className="text-sm font-bold text-white">{label}</span>
+                              <span className="text-[9px] text-slate-400 font-mono">{count} amostra{count > 1 ? "s" : ""}</span>
+                              <button
+                                onClick={() => deleteSampleGroup(label)}
+                                className="absolute inset-0 bg-red-600/90 text-white text-[9px] uppercase font-bold rounded-xl flex items-center justify-center opacity-0 group-hover/sample:opacity-100 transition-opacity"
+                                title={`Excluir amostras de ${label}`}
+                              >
+                                Apagar
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Export Card at bottom of side panel */}
+                {csvSamples.length > 0 && (
+                  <button
+                    onClick={exportToCSV}
+                    className="w-full mt-3 py-2.5 bg-slate-900 hover:bg-slate-800 rounded-xl text-xs font-bold uppercase tracking-wider text-emerald-400 border border-emerald-500/10 hover:border-emerald-500/30 flex items-center justify-center gap-1.5 transition-all shrink-0"
+                  >
+                    <Download size={13} />
+                    <span>Exportar Dataset CSV</span>
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -1022,6 +1680,216 @@ export default function App() {
           )}
         </div>
       </section>
+
+      {/* CSV Column Mapping Wizard Modal */}
+      <AnimatePresence>
+        {showMappingWizard && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/85 backdrop-blur-md flex items-center justify-center z-50 p-4 overflow-y-auto"
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 15 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 15 }}
+              className="bg-[#0f1115] border border-white/10 rounded-3xl w-full max-w-4xl h-[90vh] md:h-[80vh] flex flex-col overflow-hidden shadow-2xl"
+            >
+              {/* Header */}
+              <header className="p-5 border-b border-white/5 flex justify-between items-center bg-slate-950/40 shrink-0">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-2 bg-emerald-500/10 rounded-xl border border-emerald-500/20 text-emerald-400">
+                    <FileSpreadsheet size={20} />
+                  </div>
+                  <div>
+                    <h2 className="text-sm font-bold text-white tracking-wide">Mapeamento de Colunas do CSV</h2>
+                    <p className="text-[10px] text-slate-400">Ajuste como os dados gravados no Python serão interpretados no site.</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => { setShowMappingWizard(false); setUploadedCsvText(""); }}
+                  className="p-1.5 hover:bg-white/5 rounded-lg text-slate-400 hover:text-white transition-colors"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </header>
+
+              {/* Main Content Area */}
+              <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
+                {/* Left Side: Preview & Presets */}
+                <div className="w-full md:w-[350px] border-b md:border-b-0 md:border-r border-white/5 p-5 flex flex-col gap-4 overflow-y-auto bg-slate-950/20 shrink-0">
+                  <div>
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-2">Pré-visualização do Sinal</span>
+                    <div className="border border-white/5 rounded-2xl overflow-hidden aspect-square bg-slate-950 flex items-center justify-center relative shadow-inner">
+                      <canvas
+                        ref={wizardPreviewCanvasRef}
+                        width={300}
+                        height={300}
+                        className="w-full h-full object-contain"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Axis Inverter */}
+                  <label className="flex items-center gap-2.5 p-3 bg-white/[0.02] border border-white/5 rounded-xl cursor-pointer hover:bg-white/[0.04] transition-colors shrink-0">
+                    <input
+                      type="checkbox"
+                      checked={invertCsvY}
+                      onChange={(e) => setInvertCsvY(e.target.checked)}
+                      className="rounded border-white/10 text-emerald-500 focus:ring-emerald-500/30 bg-slate-900 w-4 h-4"
+                    />
+                    <div>
+                      <span className="text-[11px] font-semibold text-white block">Inverter Eixo Y</span>
+                      <span className="text-[9px] text-slate-400 block">Corrigir se a mão parecer de cabeça para baixo</span>
+                    </div>
+                  </label>
+
+                  {/* Predefinições Rápidas */}
+                  <div>
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-2">Predefinições Rápidas (Presets)</span>
+                    <div className="flex flex-col gap-1.5">
+                      <button
+                        onClick={() => applyMappingPreset("autodetect")}
+                        className="w-full text-left py-2 px-3 bg-slate-900 hover:bg-slate-800 rounded-xl text-[10px] font-semibold text-slate-300 border border-white/5 hover:border-white/10 flex items-center justify-between"
+                      >
+                        <span>Autodetectar por Nomes</span>
+                        <span className="text-[8px] bg-slate-800 text-slate-500 px-1.5 py-0.5 rounded">Smart</span>
+                      </button>
+                      <button
+                        onClick={() => applyMappingPreset("mp_3d")}
+                        className="w-full text-left py-2 px-3 bg-slate-900 hover:bg-slate-800 rounded-xl text-[10px] font-semibold text-slate-300 border border-white/5 hover:border-white/10 flex items-center justify-between"
+                      >
+                        <span>MediaPipe Completo (21 pontos 3D)</span>
+                        <span className="text-[8px] bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded font-mono">63 colunas</span>
+                      </button>
+                      <button
+                        onClick={() => applyMappingPreset("mp_2d")}
+                        className="w-full text-left py-2 px-3 bg-slate-900 hover:bg-slate-800 rounded-xl text-[10px] font-semibold text-slate-300 border border-white/5 hover:border-white/10 flex items-center justify-between"
+                      >
+                        <span>MediaPipe Completo (21 pontos 2D)</span>
+                        <span className="text-[8px] bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded font-mono">42 colunas</span>
+                      </button>
+                      <button
+                        onClick={() => applyMappingPreset("tips_3d")}
+                        className="w-full text-left py-2 px-3 bg-slate-900 hover:bg-slate-800 rounded-xl text-[10px] font-semibold text-slate-300 border border-white/5 hover:border-white/10 flex items-center justify-between"
+                      >
+                        <span>Pontas dos Dedos (5 pontos 3D)</span>
+                        <span className="text-[8px] bg-sky-500/10 text-sky-400 px-1.5 py-0.5 rounded font-mono">15 colunas</span>
+                      </button>
+                      <button
+                        onClick={() => applyMappingPreset("tips_2d")}
+                        className="w-full text-left py-2 px-3 bg-slate-900 hover:bg-slate-800 rounded-xl text-[10px] font-semibold text-slate-300 border border-white/5 hover:border-white/10 flex items-center justify-between"
+                      >
+                        <span>Pontas dos Dedos (5 pontos 2D)</span>
+                        <span className="text-[8px] bg-sky-500/10 text-sky-400 px-1.5 py-0.5 rounded font-mono">10 colunas</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Right Side: Columns Mapping List */}
+                <div className="flex-1 flex flex-col overflow-hidden bg-[#0a0c0e]">
+                  <div className="p-3 bg-slate-950/30 border-b border-white/5 text-[10px] text-slate-400 flex items-center justify-between shrink-0 font-mono">
+                    <span>Total de Colunas: {csvHeaders.length}</span>
+                    <span className="text-emerald-400">Ativas: {columnMappings.filter(m => m.targetLandmark >= 0 || m.coordinate === "label").length}</span>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+                    <div className="grid grid-cols-1 gap-2">
+                      {columnMappings.map((m) => {
+                        const isActive = m.targetLandmark >= 0 || m.coordinate === "label";
+                        return (
+                          <div
+                            key={m.colIndex}
+                            className={`flex flex-col sm:flex-row items-stretch sm:items-center justify-between p-3 rounded-xl border transition-all ${
+                              isActive
+                                ? "bg-emerald-500/[0.02] border-emerald-500/20 shadow-sm"
+                                : "bg-white/[0.01] border-white/5 opacity-60 hover:opacity-100"
+                            }`}
+                          >
+                            <div className="flex items-center gap-3 mb-2 sm:mb-0">
+                              <span className="text-[10px] font-mono bg-slate-900 text-slate-400 px-2 py-1 rounded border border-white/5">
+                                #{m.colIndex}
+                              </span>
+                              <div className="min-w-0">
+                                <span className="text-xs font-semibold text-white block truncate max-w-[150px] sm:max-w-[180px] font-mono">
+                                  {m.header}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="flex gap-2 items-center">
+                              {/* Destination Joint Select */}
+                              <select
+                                value={m.coordinate === "label" ? "label" : m.targetLandmark}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  if (val === "label") {
+                                    updateSingleColumnMapping(m.colIndex, -1, "label");
+                                  } else {
+                                    updateSingleColumnMapping(m.colIndex, parseInt(val, 10), m.coordinate === "label" ? "x" : m.coordinate);
+                                  }
+                                }}
+                                className="bg-slate-900 border border-white/10 rounded-lg px-2.5 py-1.5 text-[11px] text-white focus:outline-none focus:border-emerald-500 font-medium"
+                              >
+                                <option value="-1">❌ Ignorar / Descartar</option>
+                                <option value="label">🏷️ Letra (Sinal / Label)</option>
+                                <optgroup label="Articulações">
+                                  {Object.entries(LANDMARK_NAMES).map(([idx, name]) => (
+                                    <option key={idx} value={idx}>
+                                      {name}
+                                    </option>
+                                  ))}
+                                </optgroup>
+                              </select>
+
+                              {/* Coordinate Axis Select (Disabled for Label) */}
+                              {m.coordinate !== "label" && (
+                                <select
+                                  disabled={m.targetLandmark === -1}
+                                  value={m.coordinate}
+                                  onChange={(e) => {
+                                    updateSingleColumnMapping(m.colIndex, m.targetLandmark, e.target.value as "x" | "y" | "z");
+                                  }}
+                                  className="bg-slate-900 border border-white/10 rounded-lg px-2.5 py-1.5 text-[11px] text-white focus:outline-none focus:border-emerald-500 font-mono disabled:opacity-30"
+                                >
+                                  <option value="x">Eixo X</option>
+                                  <option value="y">Eixo Y</option>
+                                  <option value="z">Eixo Z</option>
+                                </select>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Footer */}
+              <footer className="p-4 border-t border-white/5 bg-slate-950/40 flex justify-end gap-3 shrink-0">
+                <button
+                  onClick={() => { setShowMappingWizard(false); setUploadedCsvText(""); }}
+                  className="px-4 py-2 text-xs font-bold uppercase tracking-wider text-slate-400 hover:text-white hover:bg-white/5 rounded-xl transition-all"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={confirmCSVImport}
+                  className="px-5 py-2.5 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-black text-xs font-bold uppercase tracking-wider rounded-xl transition-all flex items-center gap-1.5 shadow-lg shadow-emerald-500/10"
+                >
+                  <CheckCircle2 size={13} />
+                  Confirmar e Importar
+                </button>
+              </footer>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Styled inline components */}
       <style>{`

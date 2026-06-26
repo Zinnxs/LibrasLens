@@ -12,8 +12,25 @@ export default defineConfig(() => {
       VitePWA({
         registerType: 'autoUpdate',
         workbox: {
-          maximumFileSizeToCacheInBytes: 10 * 1024 * 1024,
-          cleanupOutdatedCaches: true
+          maximumFileSizeToCacheInBytes: 15 * 1024 * 1024,
+          cleanupOutdatedCaches: true,
+          globPatterns: ['**/*.{js,css,html,ico,png,svg,json}'],
+          runtimeCaching: [
+            {
+              urlPattern: /.*\.wasm|.*\.tflite|.*\.data|.*\.binarypb/,
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'mediapipe-assets',
+                expiration: {
+                  maxEntries: 30,
+                  maxAgeSeconds: 30 * 24 * 60 * 60, // 30 days
+                },
+                cacheableResponse: {
+                  statuses: [0, 200]
+                }
+              }
+            }
+          ]
         },
         manifest: {
           name: 'LibrasLens',

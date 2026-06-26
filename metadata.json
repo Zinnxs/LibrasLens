@@ -1,6 +1,10 @@
 {
-  "name": "LibrasLens",
+  "name": "Remix: LibrasLens",
   "description": "Tradutor em tempo real de LIBRAS utilizando a câmera e inteligência artificial.",
-  "requestFramePermissions": ["camera"],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
