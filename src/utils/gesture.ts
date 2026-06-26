@@ -46,6 +46,7 @@ export const guessGesture = (keypoints: Keypoint[]): string | null => {
   const ringFolded = distance(ring.tip, wrist) < distance(ring.pip, wrist);
   const pinkyFolded = distance(pinky.tip, wrist) < distance(pinky.pip, wrist);
 
+  // Is thumb extended away from the palm?
   const thumbExtendDist = distance(thumb.tip, pinky.mcp) > distance(thumb.ip, pinky.mcp) * 1.1;
   const thumbIndexDist = distance(thumb.tip, index.tip);
   const indexMiddleBaseDist = distance(index.mcp, middle.mcp);
@@ -65,12 +66,12 @@ export const guessGesture = (keypoints: Keypoint[]): string | null => {
   // K, P, H (Index and Middle extended, thumb extended/between)
   if (thumbExtendDist && !ringUp && !pinkyUp) {
     if (indexUp && middleUp) {
-      if (distance(thumb.tip, middle.pip) < indexMiddleBaseDist * 2) return "H";
+      // H is usually fingers pointing forward/horizontal, K is up. We approximate
+      if (Math.abs(palmDir.x) > Math.abs(palmDir.y)) return "H";
       return "K";
     }
-    if (!indexFolded && !middleFolded && ringFolded && pinkyFolded) {
-      return "P";
-    }
+    // P is K but pointing down
+    if (palmDir.y > 0.5) return "P";
   }
 
   // V, U, R
@@ -92,51 +93,50 @@ export const guessGesture = (keypoints: Keypoint[]): string | null => {
 
   // L, G, Q (Thumb and Index extended)
   if (thumbExtendDist && indexUp && !middleUp && !ringUp && !pinkyUp) {
-    const thumbAlign = dot(normalize({ x: thumb.tip.x - thumb.mcp.x, y: thumb.tip.y - thumb.mcp.y }), palmDir);
-    if (thumbAlign > 0.4) return "G";
+    // If palm points horizontally or down, it's G or Q
+    if (palmDir.y > 0.5) return "Q";
+    if (Math.abs(palmDir.x) > Math.abs(palmDir.y)) return "G";
     return "L";
-  }
-  
-  if (thumbExtendDist && !indexUp && !middleUp && !ringUp && !pinkyUp) {
-    if (!indexFolded && ringFolded && pinkyFolded) return "Q";
   }
 
   // I, Y, J
   if (!indexUp && !middleUp && !ringUp && pinkyUp) {
     if (thumbExtendDist) return "Y";
-    // J is I with movement, we return J/I. Let's just return I.
+    
+    // Distinguish J by palm orientation if possible, but they are similar statically.
+    // J often has the hand tilted or swooping. We'll return I/J as I for simplicity or use palm.
+    if (Math.abs(palmDir.x) > 0.6) return "J"; // Rough proxy for J motion
     return "I";
   }
 
   // D, Z, X
   if (!thumbExtendDist && indexUp && !middleUp && !ringUp && !pinkyUp) {
-    if (distance(thumb.tip, middle.tip) < indexMiddleBaseDist * 1.8) {
-      return "D"; 
-    }
-    return "D"; // Z is D with movement
-  }
-
-  // X: Index hooked
-  if (!thumbExtendDist && !indexUp && !indexFolded && middleFolded && ringFolded && pinkyFolded) {
-    return "X";
+    // X is index hooked
+    if (distance(index.tip, index.mcp) < distance(index.pip, index.mcp)) return "X";
+    
+    // Z is D with motion, we proxy with palm horizontal
+    if (Math.abs(palmDir.x) > 0.6) return "Z";
+    return "D";
   }
 
   // F, T
   if (!indexUp && middleUp && ringUp && pinkyUp) {
-    if (thumbIndexDist < indexMiddleBaseDist * 2) {
-      if (distance(thumb.tip, middle.mcp) > distance(index.pip, middle.mcp)) {
-        return "F";
-      }
-      return "T";
+    // In LIBRAS, F is thumb outside index, T is thumb inside index
+    // We check if thumb tip is closer to index pip/mcp or further outside
+    const thumbToPip = distance(thumb.tip, index.pip);
+    const thumbToMcp = distance(thumb.tip, index.mcp);
+    if (thumbToPip > thumbToMcp) {
+      return "F"; // Thumb is outside/above
     }
+    return "T"; // Thumb is tucked inside
   }
   
   // Alternative T and F (others folded)
   if (!indexUp && !middleUp && !ringUp && !pinkyUp) {
     if (!indexFolded && middleFolded && ringFolded && pinkyFolded && thumbIndexDist < indexMiddleBaseDist * 2) {
-      if (distance(thumb.tip, middle.mcp) > distance(index.pip, middle.mcp)) {
-        return "F";
-      }
+      const thumbToPip = distance(thumb.tip, index.pip);
+      const thumbToMcp = distance(thumb.tip, index.mcp);
+      if (thumbToPip > thumbToMcp) return "F";
       return "T";
     }
   }
@@ -159,14 +159,14 @@ export const guessGesture = (keypoints: Keypoint[]): string | null => {
     if (indexFolded && middleFolded && ringFolded && pinkyFolded) {
       if (thumbExtendDist) return "A";
       
-      // E vs S
+      // E vs S: In S, thumb wraps over fingers. In E, thumb is tucked under or tips touch palm.
       if (distance(thumb.tip, index.pip) < indexMiddleBaseDist * 1.5) {
         return "E"; 
       }
       return "S";
     }
 
-    // M, N
+    // M, N: Index, middle, (ring) pointing forward/down over thumb
     if (!indexFolded && !middleFolded && !ringFolded && pinkyFolded) return "M";
     if (!indexFolded && !middleFolded && ringFolded && pinkyFolded) return "N";
   }
