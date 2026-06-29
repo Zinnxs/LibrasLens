@@ -37,6 +37,16 @@ type TranslationRecord = {
   text: string;
 };
 
+const normalizeWord = (word: string) => {
+  if (!word) return "";
+  return word
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // remove accents
+    .toUpperCase()
+    .replace(/Ç/g, "C") // map Ç to C
+    .replace(/[^A-Z]/g, ""); // keep only A-Z
+};
+
 const LANDMARK_NAMES: Record<number, string> = {
   0: "Pulso (Wrist)",
   1: "Polegar: Base (CMC)",
@@ -83,6 +93,67 @@ export default function App() {
 
   // State for Translator mode
   const [currentSentence, setCurrentSentence] = useState<string>("");
+  const [interpreterEnabled, setInterpreterEnabled] = useState<boolean>(true);
+  const [speakLetters, setSpeakLetters] = useState<boolean>(true);
+  const [autoSpeakWord, setAutoSpeakWord] = useState<boolean>(true);
+  const [isCurrentlySpeaking, setIsCurrentlySpeaking] = useState<boolean>(false);
+  const [lastInterpretedWord, setLastInterpretedWord] = useState<string>("");
+
+  const speakLettersRef = useRef(speakLetters);
+  const interpreterEnabledRef = useRef(interpreterEnabled);
+
+  useEffect(() => {
+    speakLettersRef.current = speakLetters;
+  }, [speakLetters]);
+
+  useEffect(() => {
+    interpreterEnabledRef.current = interpreterEnabled;
+  }, [interpreterEnabled]);
+
+  // Real-time automatic word-to-speech interpreter (with debounce)
+  useEffect(() => {
+    if (appMode !== "translator" || !interpreterEnabled || !autoSpeakWord || !currentSentence) {
+      return;
+    }
+
+    if (currentSentence.endsWith(" ")) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      const trimmed = currentSentence.trim();
+      if (!trimmed) return;
+
+      const words = trimmed.split(/\s+/);
+      const lastWord = words[words.length - 1];
+
+      if (lastWord && lastWord.length > 0) {
+        setLastInterpretedWord(lastWord);
+        setIsCurrentlySpeaking(true);
+
+        if (window.speechSynthesis) {
+          window.speechSynthesis.cancel();
+          const utterance = new SpeechSynthesisUtterance(lastWord.toLowerCase());
+          utterance.lang = "pt-BR";
+          utterance.rate = 1.0;
+          utterance.onend = () => {
+            setIsCurrentlySpeaking(false);
+          };
+          window.speechSynthesis.speak(utterance);
+        }
+
+        setCurrentSentence((prev) => {
+          if (prev && !prev.endsWith(" ")) {
+            return prev + " ";
+          }
+          return prev;
+        });
+      }
+    }, 1800);
+
+    return () => clearTimeout(timer);
+  }, [currentSentence, appMode, interpreterEnabled, autoSpeakWord]);
+
   const [showGuide, setShowGuide] = useState(false);
   const [history, setHistory] = useState<TranslationRecord[]>(() => {
     const saved = localStorage.getItem("libras_history");
@@ -100,6 +171,13 @@ export default function App() {
     const saved = localStorage.getItem("libras_practice_streak");
     return saved ? parseInt(saved, 10) : 0;
   });
+
+  // State for Speller (Soletrador) in Practice mode
+  const [practiceSubMode, setPracticeSubMode] = useState<"letters" | "speller">("letters");
+  const [spellerInput, setSpellerInput] = useState<string>("");
+  const [spellerWord, setSpellerWord] = useState<string>("");
+  const [spellerIndex, setSpellerIndex] = useState<number>(0);
+  const [spellerCompleted, setSpellerCompleted] = useState<boolean>(false);
 
   // Custom CSV & Landmark Dataset States
   const [csvSamples, setCsvSamples] = useState<CSVSample[]>(() => {
@@ -445,6 +523,15 @@ export default function App() {
                     lastCommittedTime = now;
                     gestureHistory.length = 0; // Clear history to prevent duplicate instant prints
 
+                    // Speak the committed letter if voice interpreter is enabled
+                    if (interpreterEnabledRef.current && speakLettersRef.current && window.speechSynthesis) {
+                      window.speechSynthesis.cancel();
+                      const utterance = new SpeechSynthesisUtterance(smoothedGuess.toLowerCase());
+                      utterance.lang = "pt-BR";
+                      utterance.rate = 1.35;
+                      window.speechSynthesis.speak(utterance);
+                    }
+
                     // Trigger subtle vibration feedback on phone
                     if (navigator.vibrate) {
                       navigator.vibrate(35);
@@ -484,32 +571,7 @@ export default function App() {
     };
   }, [detector, isVideoReady, isDetectionPaused, appMode]);
 
-  // Practice progress tracker logic
-  useEffect(() => {
-    if (appMode !== "practice" || !practiceTarget) return;
 
-    if (activeGesture === practiceTarget) {
-      // Progressively fill the practice ring
-      const interval = setInterval(() => {
-        setPracticeProgress((prev) => {
-          const next = prev + 12;
-          if (next >= 100) {
-            clearInterval(interval);
-            handlePracticeSuccess();
-            return 100;
-          }
-          return next;
-        });
-      }, 100);
-      return () => clearInterval(interval);
-    } else {
-      // Slow progress decay when not matching to avoid accidental quick swipes
-      const interval = setInterval(() => {
-        setPracticeProgress((prev) => Math.max(0, prev - 10));
-      }, 120);
-      return () => clearInterval(interval);
-    }
-  }, [activeGesture, practiceTarget, appMode]);
 
   // Interactive CSV Column Mapping Wizard Preview Renderer
   const wizardPreviewCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -628,9 +690,13 @@ export default function App() {
   const handlePracticeSuccess = useCallback(() => {
     playSuccessSound();
 
+    const currentTarget = practiceSubMode === "speller"
+      ? (spellerWord && !spellerCompleted ? (normalizeWord(spellerWord)[spellerIndex] || "A") : "A")
+      : practiceTarget;
+
     if (window.speechSynthesis) {
       window.speechSynthesis.cancel();
-      const speakText = `Excelente! Letra ${practiceTarget}`;
+      const speakText = `Excelente! Letra ${currentTarget}`;
       const utterance = new SpeechSynthesisUtterance(speakText);
       utterance.lang = "pt-BR";
       window.speechSynthesis.speak(utterance);
@@ -653,16 +719,88 @@ export default function App() {
       return next;
     });
 
-    // Shift to next random letter
-    setPracticeTarget((prev) => {
-      const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
-      const filtered = letters.filter((l) => l !== prev);
-      const randomLetter = filtered[Math.floor(Math.random() * filtered.length)];
-      return randomLetter;
-    });
+    if (practiceSubMode === "speller") {
+      const clean = normalizeWord(spellerWord);
+      const nextIdx = spellerIndex + 1;
+      if (nextIdx >= clean.length) {
+        // Word completed!
+        setSpellerCompleted(true);
+        setTimeout(() => {
+          if (window.speechSynthesis) {
+            window.speechSynthesis.cancel();
+            const speakText = `Parabéns! Você soletrou a palavra ${spellerWord} com sucesso!`;
+            const utterance = new SpeechSynthesisUtterance(speakText);
+            utterance.lang = "pt-BR";
+            window.speechSynthesis.speak(utterance);
+          }
+          // Play fanfare
+          try {
+            const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+            const now = audioCtx.currentTime;
+            const playTone = (freq: number, start: number, duration: number) => {
+              const osc = audioCtx.createOscillator();
+              const gain = audioCtx.createGain();
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(freq, start);
+              gain.gain.setValueAtTime(0.12, start);
+              gain.gain.exponentialRampToValueAtTime(0.001, start + duration);
+              osc.connect(gain);
+              gain.connect(audioCtx.destination);
+              osc.start(start);
+              osc.stop(start + duration);
+            };
+            playTone(523.25, now, 0.15); // C5
+            playTone(659.25, now + 0.1, 0.15); // E5
+            playTone(783.99, now + 0.2, 0.15); // G5
+            playTone(1046.50, now + 0.3, 0.4); // C6
+          } catch(e){}
+        }, 150);
+      } else {
+        setSpellerIndex(nextIdx);
+      }
+    } else {
+      // Shift to next random letter
+      setPracticeTarget((prev) => {
+        const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
+        const filtered = letters.filter((l) => l !== prev);
+        const randomLetter = filtered[Math.floor(Math.random() * filtered.length)];
+        return randomLetter;
+      });
+    }
 
     setPracticeProgress(0);
-  }, [practiceTarget]);
+  }, [practiceTarget, practiceSubMode, spellerWord, spellerIndex, spellerCompleted]);
+
+  // Practice progress tracker logic
+  const currentTarget = practiceSubMode === "speller"
+    ? (spellerWord && !spellerCompleted ? (normalizeWord(spellerWord)[spellerIndex] || null) : null)
+    : practiceTarget;
+
+  useEffect(() => {
+    if (appMode !== "practice" || !currentTarget) return;
+
+    if (activeGesture === currentTarget) {
+      // Progressively fill the practice ring
+      const interval = setInterval(() => {
+        setPracticeProgress((prev) => {
+          const next = prev + 12;
+          if (next >= 100) {
+            clearInterval(interval);
+            handlePracticeSuccess();
+            return 100;
+          }
+          return next;
+        });
+      }, 100);
+      return () => clearInterval(interval);
+    } else {
+      // Slow progress decay when not matching to avoid accidental quick swipes
+      const interval = setInterval(() => {
+        setPracticeProgress((prev) => Math.max(0, prev - 10));
+      }, 120);
+      return () => clearInterval(interval);
+    }
+  }, [activeGesture, currentTarget, appMode, handlePracticeSuccess]);
 
   // Save translation sentence to history
   const saveSentence = () => {
@@ -1129,7 +1267,7 @@ export default function App() {
 
           {/* Practice Challenge HUD Overlay */}
           <AnimatePresence>
-            {appMode === "practice" && isVideoReady && (
+            {appMode === "practice" && isVideoReady && currentTarget && (
               <motion.div
                 initial={{ opacity: 0, y: -20 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -1161,7 +1299,7 @@ export default function App() {
                         className="transition-all duration-100 ease-out"
                       />
                     </svg>
-                    <span className="absolute text-xl font-bold text-white">{practiceTarget}</span>
+                    <span className="absolute text-xl font-bold text-white">{currentTarget}</span>
                   </div>
                   <div>
                     <div className="text-[9px] uppercase tracking-wider text-slate-400">FAÇA O SINAL DA LETRA</div>
@@ -1171,9 +1309,9 @@ export default function App() {
 
                 {/* Micro illustration card helper */}
                 <div className="bg-slate-900/90 backdrop-blur-md border border-white/10 p-2.5 rounded-2xl w-16 h-16 sm:w-20 sm:h-20 flex flex-col items-center justify-center shrink-0 pointer-events-auto shadow-xl">
-                  <span className="text-[8px] uppercase text-slate-500 font-bold mb-1">Dica ({practiceTarget})</span>
+                  <span className="text-[8px] uppercase text-slate-500 font-bold mb-1">Dica ({currentTarget})</span>
                   <img
-                    src={`https://commons.wikimedia.org/wiki/Special:FilePath/Sign_language_${practiceTarget}.svg`}
+                    src={`https://commons.wikimedia.org/wiki/Special:FilePath/Sign_language_${currentTarget}.svg`}
                     alt="Sinal ajuda"
                     className="w-10 h-10 sm:w-12 sm:h-12 object-contain bg-white rounded-lg p-0.5"
                     onError={(e) => {
@@ -1287,6 +1425,116 @@ export default function App() {
             
             {appMode === "translator" ? (
               <>
+                {/* AI Voice Interpreter Control Panel */}
+                <div className="bg-gradient-to-br from-emerald-500/10 to-teal-500/5 border border-emerald-500/20 p-4 rounded-2xl mb-5 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Volume2 className="text-emerald-400 shrink-0" size={16} />
+                      <div>
+                        <h3 className="text-xs font-bold text-white uppercase tracking-wider">
+                          Intérprete por Voz
+                        </h3>
+                        <p className="text-[9px] text-slate-400">Libras para Áudio em Tempo Real</p>
+                      </div>
+                    </div>
+                    {/* Master Switch */}
+                    <button
+                      onClick={() => setInterpreterEnabled(prev => !prev)}
+                      className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                        interpreterEnabled ? "bg-emerald-500" : "bg-slate-800"
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                          interpreterEnabled ? "translate-x-5" : "translate-x-0"
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  {interpreterEnabled && (
+                    <div className="space-y-3 pt-1 border-t border-white/5">
+                      {/* Audio feedback visualization wave */}
+                      <div className="bg-slate-950/60 rounded-xl p-3 border border-white/5 flex flex-col items-center justify-center min-h-[70px] relative overflow-hidden">
+                        {isCurrentlySpeaking ? (
+                          <div className="flex flex-col items-center gap-2">
+                            {/* Animated Sound Waves */}
+                            <div className="flex items-center gap-1 h-6">
+                              {[...Array(6)].map((_, i) => (
+                                <motion.div
+                                  key={i}
+                                  className="w-1 bg-gradient-to-t from-emerald-500 to-teal-400 rounded-full"
+                                  animate={{
+                                    height: [8, 24, 8],
+                                  }}
+                                  transition={{
+                                    duration: 0.5 + i * 0.1,
+                                    repeat: Infinity,
+                                    repeatType: "reverse",
+                                    ease: "easeInOut",
+                                  }}
+                                />
+                              ))}
+                            </div>
+                            <span className="text-[10px] uppercase font-bold text-emerald-400 tracking-widest animate-pulse">
+                              Falando: "{lastInterpretedWord}"
+                            </span>
+                          </div>
+                        ) : lastInterpretedWord ? (
+                          <div className="text-center">
+                            <span className="text-[8px] uppercase tracking-wider text-slate-500 font-bold block mb-1">
+                              Última Palavra Falada
+                            </span>
+                            <span className="text-xs font-mono font-bold text-slate-300 bg-white/5 px-2.5 py-1 rounded-lg border border-white/5 inline-block">
+                              {lastInterpretedWord.toUpperCase()}
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="text-center text-slate-500 italic text-[10px] leading-relaxed max-w-[200px]">
+                            Sinalize letras em Libras. O sistema falará quando você pausar!
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Toggles */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[10px] font-medium text-slate-300">
+                        {/* Toggle Falar Letras */}
+                        <div 
+                          onClick={() => setSpeakLetters(p => !p)}
+                          className={`flex items-center gap-2 p-2 rounded-xl border cursor-pointer transition-all ${
+                            speakLetters 
+                              ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-400 font-semibold" 
+                              : "bg-slate-900/40 border-white/5 text-slate-400"
+                          }`}
+                        >
+                          <span className={`w-1.5 h-1.5 rounded-full ${speakLetters ? "bg-emerald-400 animate-pulse" : "bg-slate-600"}`}></span>
+                          <span>Falar cada Letra</span>
+                        </div>
+
+                        {/* Toggle Falar Palavras */}
+                        <div 
+                          onClick={() => setAutoSpeakWord(p => !p)}
+                          className={`flex items-center gap-2 p-2 rounded-xl border cursor-pointer transition-all ${
+                            autoSpeakWord 
+                              ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-400 font-semibold" 
+                              : "bg-slate-900/40 border-white/5 text-slate-400"
+                          }`}
+                        >
+                          <span className={`w-1.5 h-1.5 rounded-full ${autoSpeakWord ? "bg-emerald-400 animate-pulse" : "bg-slate-600"}`}></span>
+                          <span>Falar Palavra (Pausa)</span>
+                        </div>
+                      </div>
+
+                      <p className="text-[8px] text-slate-500 leading-relaxed text-center">
+                        Dica: O intérprete detecta 1.8 segundos de pausa após os sinais para pronunciar a palavra inteira e inserir o espaço.
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Decorative Separator Line */}
+                <div className="border-b border-white/5 pb-2 mb-4"></div>
+
                 <div className="flex justify-between items-center mb-4">
                   <div className="flex items-center gap-2">
                     <History size={14} className="text-slate-400" />
@@ -1361,56 +1609,263 @@ export default function App() {
                 </div>
               </>
             ) : appMode === "practice" ? (
-              // Practice Mode detailed instructions panel
+              // Practice Mode detailed instructions panel with Speller
               <div className="flex flex-col h-full justify-between">
-                <div>
-                  <div className="flex items-center gap-2 mb-4">
-                    <Sparkles size={14} className="text-emerald-400" />
-                    <h2 className="text-xs uppercase tracking-[0.15em] text-slate-400 font-bold">
-                      Painel de Treino Diário
-                    </h2>
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Sparkles size={14} className="text-emerald-400" />
+                      <h2 className="text-xs uppercase tracking-[0.15em] text-slate-400 font-bold">
+                        Painel de Treino Diário
+                      </h2>
+                    </div>
                   </div>
 
-                  <div className="bg-gradient-to-br from-emerald-500/10 to-teal-500/10 border border-emerald-500/20 p-4 rounded-2xl mb-4">
-                    <h3 className="text-sm font-semibold text-white flex items-center gap-2 mb-1.5">
-                      <CheckCircle2 size={15} className="text-emerald-400" />
-                      Como Funciona?
-                    </h3>
-                    <p className="text-[11px] text-slate-300 leading-relaxed">
-                      Mostre o sinal correspondente à letra exibida na tela. O anel ao redor da letra se encherá conforme você mantém a posição correta. Complete 100% para ganhar pontos!
+                  {/* Mode Toggle Tabs */}
+                  <div className="grid grid-cols-2 bg-slate-900/80 p-1 rounded-xl border border-white/5 shrink-0">
+                    <button
+                      onClick={() => {
+                        setPracticeSubMode("letters");
+                        setPracticeProgress(0);
+                      }}
+                      className={`px-3 py-1.5 text-[10px] uppercase tracking-wider font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 ${
+                        practiceSubMode === "letters"
+                          ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                          : "text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      <BookOpen size={11} />
+                      <span>Letras Soltas</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setPracticeSubMode("speller");
+                        setPracticeProgress(0);
+                      }}
+                      className={`px-3 py-1.5 text-[10px] uppercase tracking-wider font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 ${
+                        practiceSubMode === "speller"
+                          ? "bg-emerald-500 text-black shadow-md shadow-emerald-500/10 font-bold"
+                          : "text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      <Sparkles size={11} />
+                      <span>Soletrador</span>
+                    </button>
+                  </div>
+
+                  {practiceSubMode === "letters" ? (
+                    <>
+                      <div className="bg-gradient-to-br from-emerald-500/10 to-teal-500/10 border border-emerald-500/20 p-4 rounded-2xl">
+                        <h3 className="text-sm font-semibold text-white flex items-center gap-2 mb-1.5">
+                          <CheckCircle2 size={15} className="text-emerald-400" />
+                          Como Funciona?
+                        </h3>
+                        <p className="text-[11px] text-slate-300 leading-relaxed">
+                          Mostre o sinal correspondente à letra exibida na tela. O anel ao redor da letra se encherá conforme você mantém a posição correta. Complete 100% para ganhar pontos!
+                        </p>
+                      </div>
+
+                      {/* Level Progress Visual Bar */}
+                      <div className="space-y-2 bg-white/[0.02] border border-white/5 p-4 rounded-2xl">
+                        <div className="flex justify-between items-center text-xs">
+                          <span className="text-slate-400">Status do Treino</span>
+                          <span className="text-emerald-400 font-mono font-bold">Nível {Math.floor(practiceScore / 50) + 1}</span>
+                        </div>
+                        <div className="w-full bg-slate-900 h-2 rounded-full overflow-hidden border border-white/5">
+                          <div 
+                            className="bg-gradient-to-r from-emerald-500 to-teal-400 h-full transition-all duration-300"
+                            style={{ width: `${(practiceScore % 50) * 2}%` }}
+                          ></div>
+                        </div>
+                        <div className="text-[10px] text-slate-500 flex justify-between">
+                          <span>Próximo nível</span>
+                          <span>{50 - (practiceScore % 50)} pts restantes</span>
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    /* Speller Sub-Mode */
+                    <div className="space-y-4">
+                      {!spellerWord ? (
+                        <>
+                          <div className="bg-gradient-to-br from-indigo-500/10 to-emerald-500/10 border border-indigo-500/20 p-4 rounded-2xl">
+                            <h3 className="text-sm font-semibold text-white flex items-center gap-2 mb-1.5">
+                              <Sparkles size={15} className="text-emerald-400" />
+                              Soletrador de Libras
+                            </h3>
+                            <p className="text-[11px] text-slate-300 leading-relaxed">
+                              Digite uma palavra ou nome. A inteligência artificial irá guiar você letra por letra! Conforme fizer o sinal correto, avançaremos para a próxima letra.
+                            </p>
+                          </div>
+
+                          <div className="space-y-3 bg-white/[0.01] border border-white/5 p-4 rounded-2xl">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Palavra ou Nome</label>
+                            <input
+                              type="text"
+                              maxLength={15}
+                              placeholder="Digite e clique em Soletrar..."
+                              value={spellerInput}
+                              onChange={(e) => setSpellerInput(e.target.value.toUpperCase())}
+                              className="w-full bg-slate-900 border border-white/10 rounded-xl px-3 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 font-bold tracking-wide"
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  const clean = normalizeWord(spellerInput);
+                                  if (clean.length > 0) {
+                                    setSpellerWord(spellerInput);
+                                    setSpellerIndex(0);
+                                    setSpellerCompleted(false);
+                                    setPracticeProgress(0);
+                                  }
+                                }
+                              }}
+                            />
+                            <button
+                              onClick={() => {
+                                const clean = normalizeWord(spellerInput);
+                                if (clean.length > 0) {
+                                  setSpellerWord(spellerInput);
+                                  setSpellerIndex(0);
+                                  setSpellerCompleted(false);
+                                  setPracticeProgress(0);
+                                } else {
+                                  alert("Por favor, digite uma palavra ou nome válido (apenas letras A-Z).");
+                                }
+                              }}
+                              className="w-full py-2.5 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-black text-xs font-bold rounded-xl uppercase tracking-wider transition-all shadow-md shadow-emerald-500/5"
+                            >
+                              Começar a Soletrar
+                            </button>
+                          </div>
+
+                          {/* Quick Suggestions list */}
+                          <div className="bg-white/[0.01] border border-white/5 p-4 rounded-2xl space-y-2">
+                            <span className="text-[9px] uppercase tracking-wider text-slate-500 font-bold block">Sugestões Rápidas:</span>
+                            <div className="flex flex-wrap gap-1.5">
+                              {["LIBRAS", "AMOR", "CASA", "OBRIGADO", "AMIGO"].map((word) => (
+                                <button
+                                  key={word}
+                                  onClick={() => {
+                                    setSpellerInput(word);
+                                    setSpellerWord(word);
+                                    setSpellerIndex(0);
+                                    setSpellerCompleted(false);
+                                    setPracticeProgress(0);
+                                  }}
+                                  className="px-2.5 py-1.5 bg-white/[0.02] hover:bg-emerald-500/10 border border-white/5 hover:border-emerald-500/20 text-slate-300 hover:text-emerald-400 rounded-lg text-[10px] font-semibold transition-all"
+                                >
+                                  {word}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        </>
+                      ) : spellerCompleted ? (
+                        /* Speller Success state */
+                        <div className="bg-emerald-500/10 border border-emerald-500/20 p-5 rounded-2xl text-center space-y-3 shadow-inner">
+                          <div className="text-3xl animate-bounce-short">🎉</div>
+                          <h4 className="text-sm font-bold text-emerald-400 uppercase tracking-wide">Palavra Completada!</h4>
+                          <p className="text-[11px] text-slate-300 leading-relaxed">
+                            Você soletrou <span className="font-bold text-white">"{spellerWord.toUpperCase()}"</span> com sucesso em Libras! Excelente trabalho.
+                          </p>
+                          <button
+                            onClick={() => {
+                              setSpellerWord("");
+                              setSpellerInput("");
+                              setSpellerCompleted(false);
+                              setPracticeProgress(0);
+                            }}
+                            className="w-full py-2.5 bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-bold rounded-xl uppercase tracking-wider transition-all"
+                          >
+                            Soletrar Outra Palavra
+                          </button>
+                        </div>
+                      ) : (
+                        /* Speller Active state */
+                        <div className="space-y-4">
+                          <div className="bg-slate-900/50 border border-white/5 p-4 rounded-2xl text-center space-y-3">
+                            <span className="text-[9px] uppercase tracking-wider text-slate-500 font-bold block">Progresso da Palavra</span>
+                            
+                            {/* Letters container */}
+                            <div className="flex flex-wrap gap-1.5 justify-center items-center py-2">
+                              {spellerWord.split("").map((char, idx) => {
+                                const normChar = normalizeWord(char);
+                                const isLetter = normChar.length > 0 && /[A-Z]/.test(normChar);
+                                
+                                if (!isLetter) {
+                                  return (
+                                    <span key={idx} className="w-3 h-8 border-b-2 border-slate-700 mx-0.5"></span>
+                                  );
+                                }
+
+                                // Calculate the clean letter index
+                                const prevLetters = spellerWord.substring(0, idx).split("");
+                                const cleanIdx = prevLetters.filter(c => {
+                                  const n = normalizeWord(c);
+                                  return n.length > 0 && /[A-Z]/.test(n);
+                                }).length;
+
+                                const isCompleted = cleanIdx < spellerIndex;
+                                const isActive = cleanIdx === spellerIndex;
+
+                                return (
+                                  <div
+                                    key={idx}
+                                    className={`w-9 h-11 rounded-lg flex flex-col items-center justify-center transition-all duration-300 ${
+                                      isCompleted
+                                        ? "bg-emerald-500/15 border border-emerald-500/30 text-emerald-400"
+                                        : isActive
+                                        ? "bg-emerald-500 text-black border border-emerald-400 font-extrabold shadow-md shadow-emerald-500/10 animate-pulse"
+                                        : "bg-white/[0.01] border border-white/5 text-slate-600"
+                                    }`}
+                                  >
+                                    <span className="text-sm uppercase font-bold">{char}</span>
+                                    {isCompleted && <span className="text-[7px] font-bold mt-0.5">✓</span>}
+                                    {isActive && <span className="text-[7px] font-bold mt-0.5">●</span>}
+                                  </div>
+                                );
+                              })}
+                            </div>
+
+                            <div className="pt-2 border-t border-white/5">
+                              <p className="text-[11px] text-slate-300">
+                                Sinalize a letra <span className="font-bold text-emerald-400 text-sm">{currentTarget}</span>
+                              </p>
+                              <p className="text-[9px] text-slate-500 mt-1">
+                                Letra {spellerIndex + 1} de {normalizeWord(spellerWord).length}
+                              </p>
+                            </div>
+                          </div>
+
+                          <button
+                            onClick={() => {
+                              setSpellerWord("");
+                              setSpellerCompleted(false);
+                              setPracticeProgress(0);
+                            }}
+                            className="w-full py-2 bg-slate-900 hover:bg-slate-800 rounded-xl text-[10px] font-bold uppercase tracking-wider text-slate-400 border border-white/5"
+                          >
+                            Cancelar e Voltar
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Show Guide button (only when speller is not active) */}
+                {(!spellerWord || practiceSubMode === "letters") && (
+                  <div className="bg-slate-900/60 p-4 rounded-2xl border border-white/5 text-center mt-4 shrink-0">
+                    <p className="text-[10px] text-slate-400 leading-relaxed mb-3">
+                      Quer focar em outra letra específica? Abra o guia de sinais e selecione a letra desejada!
                     </p>
+                    <button
+                      onClick={() => setShowGuide(true)}
+                      className="w-full py-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-[10px] font-bold uppercase tracking-wider text-slate-200 border border-white/5"
+                    >
+                      Selecionar Letra no Guia
+                    </button>
                   </div>
-
-                  {/* Level Progress Visual Bar */}
-                  <div className="space-y-2 bg-white/[0.02] border border-white/5 p-4 rounded-2xl">
-                    <div className="flex justify-between items-center text-xs">
-                      <span className="text-slate-400">Status do Treino</span>
-                      <span className="text-emerald-400 font-mono font-bold">Nível {Math.floor(practiceScore / 50) + 1}</span>
-                    </div>
-                    <div className="w-full bg-slate-900 h-2 rounded-full overflow-hidden border border-white/5">
-                      <div 
-                        className="bg-gradient-to-r from-emerald-500 to-teal-400 h-full transition-all duration-300"
-                        style={{ width: `${(practiceScore % 50) * 2}%` }}
-                      ></div>
-                    </div>
-                    <div className="text-[10px] text-slate-500 flex justify-between">
-                      <span>Próximo nível</span>
-                      <span>{50 - (practiceScore % 50)} pts restantes</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="bg-slate-900/60 p-4 rounded-2xl border border-white/5 text-center mt-4">
-                  <p className="text-[10px] text-slate-400 leading-relaxed mb-3">
-                    Quer focar em outra letra específica? Abra o guia de sinais e selecione a letra desejada!
-                  </p>
-                  <button
-                    onClick={() => setShowGuide(true)}
-                    className="w-full py-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-[10px] font-bold uppercase tracking-wider text-slate-200 border border-white/5"
-                  >
-                    Selecionar Letra no Guia
-                  </button>
-                </div>
+                )}
               </div>
             ) : (
               // Dataset CSV Mode Panel
@@ -1607,8 +2062,20 @@ export default function App() {
                   )
                 ) : (
                   <span className="text-emerald-400 font-semibold flex items-center gap-2 text-base sm:text-lg">
-                    <Sparkles size={16} className="animate-spin" />
-                    Praticando Letra {practiceTarget}
+                    <Sparkles size={16} className={isDetectionPaused ? "" : "animate-spin"} />
+                    {practiceSubMode === "speller" ? (
+                      spellerWord ? (
+                        spellerCompleted ? (
+                          <span>Palavra "{spellerWord.toUpperCase()}" Concluída! 🎉</span>
+                        ) : (
+                          <span>Soletrando "{spellerWord.toUpperCase()}" • Letra {currentTarget}</span>
+                        )
+                      ) : (
+                        <span>Insira uma palavra para soletrar</span>
+                      )
+                    ) : (
+                      <span>Praticando Letra {practiceTarget}</span>
+                    )}
                   </span>
                 )}
                 {appMode === "translator" && (

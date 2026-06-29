@@ -18,32 +18,85 @@ Como usar:
 import sys
 import os
 
-# Salvaguarda contra "import shadowing" (sombreamento de importação)
-# Se houver uma pasta chamada 'mediapipe' no mesmo diretório de execução,
-# o Python tentará importar essa pasta local (que possui modelos JS/WASM do site)
-# ao invés da biblioteca real instalada via pip no seu ambiente virtual,
-# gerando o erro "module 'mediapipe' has no attribute 'solutions'".
-current_dir = os.path.abspath(os.path.dirname(__file__)) if '__file__' in locals() else os.getcwd()
-sys_path_backup = list(sys.path)
+# 1. Identificar o diretório do script e normalizá-lo para evitar shadowing de pacotes reais
+current_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in locals() else os.getcwd()
+current_dir_norm = os.path.normpath(current_dir).lower()
 
+# 2. Corrigir o sys.path imediatamente para evitar que pastas locais sombreiem pacotes reais instalados via pip
+sys_path_backup = list(sys.path)
+sys_path_filtered = []
+for p in sys.path:
+    if not p:
+        continue
+    p_norm = os.path.normpath(os.path.abspath(p)).lower()
+    # Remove o diretório atual e subpastas de cache/projetos locais
+    if p_norm == current_dir_norm:
+        continue
+    if p_norm == os.path.normpath(os.getcwd()).lower():
+        continue
+    sys_path_filtered.append(p)
+
+sys.path = sys_path_filtered
+
+# 3. Detectar e remover qualquer import "sombreado" (Shadowed Import) pré-existente
+if 'mediapipe' in sys.modules:
+    mp_temp = sys.modules['mediapipe']
+    is_shadowed = False
+    if not hasattr(mp_temp, '__file__') or mp_temp.__file__ is None:
+        is_shadowed = True
+    elif mp_temp.__file__:
+        file_abs = os.path.abspath(mp_temp.__file__)
+        file_norm = os.path.normpath(file_abs).lower()
+        parent_dir = os.path.dirname(file_abs)
+        grandparent_dir = os.path.dirname(parent_dir)
+        if os.path.normpath(grandparent_dir).lower() == current_dir_norm:
+            if "site-packages" not in file_norm and "lib" not in file_norm:
+                is_shadowed = True
+    if is_shadowed:
+        # Remove a referência corrompida/sombreada para forçar re-importação limpa do venv
+        for key in list(sys.modules.keys()):
+            if key == 'mediapipe' or key.startswith('mediapipe.'):
+                del sys.modules[key]
+
+# 4. Agora tentar importar o OpenCV e o MediaPipe de forma limpa
 try:
-    # Filtra temporariamente o diretório do script para que o import procure nos pacotes globais/venv
-    sys.path = [p for p in sys.path if p and os.path.abspath(p) != current_dir]
     import cv2
     print("\n[LibrasLens] Inicializando...")
     print("Carregando OpenCV e MediaPipe...")
     import mediapipe as mp
 except (ImportError, AttributeError) as e:
+    # Restaura o sys.path antes de exibir o erro
+    sys.path = sys_path_backup
+    
+    # Coleta informações de diagnóstico importantes
+    local_mp_exists = os.path.isdir(os.path.join(current_dir, "mediapipe")) or os.path.isdir("mediapipe")
+    protobuf_version = "Não instalado ou inacessível"
+    try:
+        import google.protobuf
+        protobuf_version = getattr(google.protobuf, "__version__", "Instalado (versão desconhecida)")
+    except ImportError:
+        pass
+
     print("\n" + "!"*70)
     print(" DETECTADO CONFLITO OU CORRUPÇÃO DE PACOTES NO SEU SISTEMA ")
     print("!"*70)
     print(f"Detalhes do erro original:\n{e}")
     print("-"*70)
-    print("Isso ocorre devido a uma incompatibilidade direta entre o MediaPipe, TensorFlow")
-    print("e a biblioteca 'protobuf' instalados globalmente no seu Python.")
-    print("\nA solução definitiva e mais segura é criar um Ambiente Virtual (venv)")
-    print("isolado de outros pacotes conflitantes. Siga estes passos simples:")
-    print("\n1. Desative o ambiente atual (se houver algum ativo):")
+    print(f"Executável Python em uso: {sys.executable}")
+    print(f"Versão do protobuf detectada: {protobuf_version}")
+    
+    if local_mp_exists:
+        print("\n[AVISO CRÍTICO DE CONFLITO LOCAL]")
+        print("Existe uma pasta chamada 'mediapipe' no seu diretório atual.")
+        print("O Python está confundindo essa pasta local com a biblioteca instalada!")
+        print("-> SOLUÇÃO: Renomeie ou remova qualquer pasta chamada 'mediapipe' nesta pasta atual.")
+    
+    print("\n>>> Siga um dos métodos abaixo para resolver:")
+    print("\nMÉTODO 1: CORRIGIR O SEU AMBIENTE ATUAL (Mais rápido)")
+    print("Execute este comando no seu terminal:")
+    print("   pip install \"protobuf>=4.21.0,<5.0.0\" --force-reinstall")
+    print("\nMÉTODO 2: CRIAR UM AMBIENTE VIRTUAL ISOLADO (Recomendado)")
+    print("1. Desative o ambiente atual (se houver algum ativo):")
     print("   deactivate")
     print("\n2. Crie um novo ambiente virtual limpo chamado 'env_libras':")
     print("   python -m venv env_libras")
@@ -51,17 +104,14 @@ except (ImportError, AttributeError) as e:
     print("   No Windows (PowerShell):  .\\env_libras\\Scripts\\Activate.ps1")
     print("   No Windows (CMD):         .\\env_libras\\Scripts\\activate.bat")
     print("   No Mac/Linux:             source env_libras/bin/activate")
-    print("\n4. Instale apenas o OpenCV e o MediaPipe de forma limpa:")
-    print("   pip install opencv-python mediapipe")
+    print("\n4. Instale as bibliotecas de forma limpa com a versão certa de protobuf:")
+    print("   pip install opencv-python mediapipe \"protobuf>=4.21.0,<5.0.0\"")
     print("\n5. Execute o script coletor com sucesso:")
     print("   python coletor_libras.py")
     print("!"*70 + "\n")
     sys.exit(1)
-finally:
-    # Restaura o sys.path original para manter o comportamento normal do Python
-    sys.path = sys_path_backup
 
-# Se as bibliotecas foram importadas mas o MediaPipe falhar por versão errada do protobuf
+# Se as bibliotecas foram importadas mas o MediaPipe falhar por versão errada do protobuf ou outro detalhe
 try:
     mp_hands = mp.solutions.hands
     hands = mp_hands.Hands(
@@ -73,21 +123,52 @@ try:
     mp_drawing = mp.solutions.drawing_utils
     mp_drawing_styles = mp.solutions.drawing_styles
 except AttributeError as e:
+    # Coleta informações de diagnóstico importantes
+    local_mp_exists = os.path.isdir(os.path.join(current_dir, "mediapipe")) or os.path.isdir("mediapipe")
+    mp_file = getattr(mp, '__file__', 'Não definido')
+    mp_path = getattr(mp, '__path__', 'Não definido')
+    protobuf_version = "Não instalado ou inacessível"
+    try:
+        import google.protobuf
+        protobuf_version = getattr(google.protobuf, "__version__", "Instalado (versão desconhecida)")
+    except ImportError:
+        pass
+
     print("\n" + "!"*70)
     print(" ERRO: O MEDIAPIPE NÃO CONSEGUIU INICIALIZAR CORRETAMENTE")
     print("!"*70)
     print(f"Detalhes: {e}")
     print("-"*70)
-    print("O MediaPipe está instalado mas não consegue acessar os módulos internos")
-    print("devido à versão do 'protobuf' instalada na sua máquina.")
-    print("\nPara corrigir isso facilmente de forma definitiva, crie um ambiente limpo:")
-    print("\n1. Crie um ambiente virtual limpo:")
+    print(f"Executável Python em uso: {sys.executable}")
+    print(f"Local de carregamento do MediaPipe: {mp_file or mp_path}")
+    print(f"Versão do protobuf instalada: {protobuf_version}")
+    
+    if local_mp_exists or "site-packages" not in str(mp_file).lower():
+        print("\n[AVISO CRÍTICO DE CONFLITO LOCAL]")
+        print("Existe uma pasta ou arquivo 'mediapipe' no seu diretório de trabalho atual.")
+        print("O Python está carregando essa pasta local (que é apenas para o site do navegador)")
+        print("ao invés de carregar o pacote real que você instalou via pip!")
+        print("-> SOLUÇÃO: Renomeie a pasta 'mediapipe' atual (por exemplo, para 'mediapipe_assets')")
+        print("   e tente rodar o script novamente.")
+    else:
+        print("\nNo Windows, a versão de 'protobuf' padrão instalada (v5+) é incompatível")
+        print("com as dependências do MediaPipe.")
+    
+    print("\n>>> Siga um dos métodos abaixo para resolver:")
+    print("\nMÉTODO 1: CORRIGIR O SEU AMBIENTE ATUAL (Recomendado)")
+    print("Execute este comando no seu terminal/PowerShell para instalar a versão correta:")
+    print("   pip install \"protobuf>=4.21.0,<5.0.0\" --force-reinstall")
+    print("\nMÉTODO 2: REINSTALAR O MEDIAPIPE DE FORMA LIMPA")
+    print("Se o comando acima não resolver, execute:")
+    print("   pip install --force-reinstall mediapipe \"protobuf>=4.21.0,<5.0.0\"")
+    print("\nMÉTODO 3: CRIAR UM AMBIENTE VIRTUAL DO ZERO")
+    print("1. Crie um ambiente virtual limpo:")
     print("   python -m venv env_libras")
-    print("\n2. Ative o ambiente:")
+    print("2. Ative o ambiente:")
     print("   .\\env_libras\\Scripts\\Activate.ps1")
-    print("\n3. Instale as bibliotecas necessárias:")
-    print("   pip install opencv-python mediapipe")
-    print("\n4. Execute novamente:")
+    print("3. Instale as bibliotecas com a restrição de protobuf:")
+    print("   pip install opencv-python mediapipe \"protobuf>=4.21.0,<5.0.0\"")
+    print("4. Execute novamente:")
     print("   python coletor_libras.py")
     print("!"*70 + "\n")
     sys.exit(1)
